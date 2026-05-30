@@ -1,0 +1,382 @@
+# Instincts generated from https://github.com/devops2626/kilocode
+# Generated: 2026-05-30T20:34:30.156Z
+# Version: 2.0
+# NOTE: This file supplements (does not replace) any existing curated instincts.
+# High-confidence manually curated instincts should be preserved alongside these.
+
+---
+id: kilocode-commit-length
+trigger: "when writing a commit message"
+confidence: 0.6
+domain: git
+source: repo-analysis
+source_repo: https://github.com/devops2626/kilocode
+---
+
+# Kilocode Commit Length
+
+## Action
+
+Write moderate-length commit messages (~57 characters)
+
+## Evidence
+
+- Average commit message length: 57 chars
+- Based on 4 commits
+
+---
+id: kilocode-naming-files
+trigger: "when creating a new file"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/devops2626/kilocode
+---
+
+# Kilocode Naming Files
+
+## Action
+
+Use kebab-case naming convention
+
+## Evidence
+
+- Analyzed file naming patterns in repository
+- Dominant pattern: kebab-case
+
+---
+id: kilocode-import-relative
+trigger: "when importing modules"
+confidence: 0.75
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/devops2626/kilocode
+---
+
+# Kilocode Import Relative
+
+## Action
+
+Use relative imports for project files
+
+## Evidence
+
+- Import analysis shows relative import pattern
+- Example: import { x } from '../lib/x'
+
+---
+id: kilocode-export-style
+trigger: "when exporting from a module"
+confidence: 0.7
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/devops2626/kilocode
+---
+
+# Kilocode Export Style
+
+## Action
+
+Prefer named exports
+
+## Evidence
+
+- Export pattern analysis
+- Dominant style: named
+
+---
+id: kilocode-test-separate
+trigger: "when writing tests"
+confidence: 0.8
+domain: testing
+source: repo-analysis
+source_repo: https://github.com/devops2626/kilocode
+---
+
+# Kilocode Test Separate
+
+## Action
+
+Place tests in the tests/ or __tests__/ directory, mirroring src structure
+
+## Evidence
+
+- Separate test directory pattern detected
+- Tests live in dedicated test folders
+
+---
+id: kilocode-workflow-changelog-update-and-backfill
+trigger: "when doing changelog update and backfill"
+confidence: 0.6
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/devops2626/kilocode
+---
+
+# Kilocode Workflow Changelog Update And Backfill
+
+## Action
+
+Follow the changelog-update-and-backfill workflow:
+1. Add or update one or more .changeset/*.md files describing changes.
+2. Update corresponding packages/*/CHANGELOG.md files with new entries.
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~2x per month
+- Files: .changeset/*.md, packages/*/CHANGELOG.md
+
+---
+id: kilocode-workflow-enforce-changelog-on-publish
+trigger: "when doing enforce changelog on publish"
+confidence: 0.6
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/devops2626/kilocode
+---
+
+# Kilocode Workflow Enforce Changelog On Publish
+
+## Action
+
+Follow the enforce-changelog-on-publish workflow:
+1. Add or update a relevant .changeset/*.md file.
+2. Modify script/publish.ts to enforce changelog requirements.
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~2x per month
+- Files: .changeset/*.md, script/publish.ts
+
+---
+id: kilocode-instinct-file-naming
+trigger: "When creating a new file in the repository"
+confidence: 0.9
+domain: code-style
+source: repo-analysis
+source_repo: devops2626/kilocode
+---
+
+# Kilocode Instinct File Naming
+
+## Action
+
+Name the file using kebab-case (e.g., my-file.ts)
+
+## Evidence
+
+- Pattern in namingConventions.files: kebab-case
+
+---
+id: kilocode-instinct-function-naming
+trigger: "When defining a new function"
+confidence: 0.9
+domain: code-style
+source: repo-analysis
+source_repo: devops2626/kilocode
+---
+
+# Kilocode Instinct Function Naming
+
+## Action
+
+Use camelCase for function names (e.g., doSomething)
+
+## Evidence
+
+- Pattern in namingConventions.functions: camelCase
+
+---
+id: kilocode-instinct-class-naming
+trigger: "When defining a new class"
+confidence: 0.9
+domain: code-style
+source: repo-analysis
+source_repo: devops2626/kilocode
+---
+
+# Kilocode Instinct Class Naming
+
+## Action
+
+Use PascalCase for class names (e.g., MyClass)
+
+## Evidence
+
+- Pattern in namingConventions.classes: PascalCase
+
+---
+id: kilocode-instinct-constant-naming
+trigger: "When defining a constant"
+confidence: 0.9
+domain: code-style
+source: repo-analysis
+source_repo: devops2626/kilocode
+---
+
+# Kilocode Instinct Constant Naming
+
+## Action
+
+Use SCREAMING_SNAKE_CASE for constant names (e.g., MAX_SIZE)
+
+## Evidence
+
+- Pattern in namingConventions.constants: SCREAMING_SNAKE_CASE
+
+---
+id: kilocode-instinct-import-style
+trigger: "When importing modules within the repository"
+confidence: 0.9
+domain: code-style
+source: repo-analysis
+source_repo: devops2626/kilocode
+---
+
+# Kilocode Instinct Import Style
+
+## Action
+
+Use relative import paths
+
+## Evidence
+
+- Pattern in importStyle: relative
+
+---
+id: kilocode-instinct-export-style
+trigger: "When exporting from a module"
+confidence: 0.9
+domain: code-style
+source: repo-analysis
+source_repo: devops2626/kilocode
+---
+
+# Kilocode Instinct Export Style
+
+## Action
+
+Use named exports
+
+## Evidence
+
+- Pattern in exportStyle: named
+
+---
+id: kilocode-instinct-test-location
+trigger: "When adding or updating tests"
+confidence: 0.8
+domain: testing
+source: repo-analysis
+source_repo: devops2626/kilocode
+---
+
+# Kilocode Instinct Test Location
+
+## Action
+
+Place test files in a separate directory from source code
+
+## Evidence
+
+- Pattern in architecture.folderStructure.testLocation: separate
+
+---
+id: kilocode-instinct-commit-prefix-fix
+trigger: "When committing a bug fix"
+confidence: 0.9
+domain: git
+source: repo-analysis
+source_repo: devops2626/kilocode
+---
+
+# Kilocode Instinct Commit Prefix Fix
+
+## Action
+
+Prefix the commit message with 'fix:'
+
+## Evidence
+
+- Seen in commit: fix: stop publishing without changelog updates
+
+---
+id: kilocode-instinct-commit-prefix-chore
+trigger: "When committing maintenance or non-feature changes"
+confidence: 0.9
+domain: git
+source: repo-analysis
+source_repo: devops2626/kilocode
+---
+
+# Kilocode Instinct Commit Prefix Chore
+
+## Action
+
+Prefix the commit message with 'chore:'
+
+## Evidence
+
+- Seen in commit: chore: backfill changelogs for v7.3.16 through v7.3.18
+
+---
+id: kilocode-instinct-commit-length
+trigger: "When writing a commit message"
+confidence: 0.8
+domain: git
+source: repo-analysis
+source_repo: devops2626/kilocode
+---
+
+# Kilocode Instinct Commit Length
+
+## Action
+
+Keep the commit message concise (average length ~57 characters)
+
+## Evidence
+
+- Pattern in commits.averageLength: 57
+
+---
+id: kilocode-instinct-changelog-update-backfill
+trigger: "When documenting new changes or backfilling missing changelog entries for releases"
+confidence: 0.95
+domain: workflow
+source: repo-analysis
+source_repo: devops2626/kilocode
+---
+
+# Kilocode Instinct Changelog Update Backfill
+
+## Action
+
+Add or update .changeset/*.md files and update corresponding packages/*/CHANGELOG.md files
+
+## Evidence
+
+- Workflow: changelog-update-and-backfill
+- Seen in commits: chore: backfill changelogs for v7.3.16 through v7.3.18
+
+---
+id: kilocode-instinct-enforce-changelog-on-publish
+trigger: "When ensuring that publishing is blocked without up-to-date changelogs"
+confidence: 0.85
+domain: workflow
+source: repo-analysis
+source_repo: devops2626/kilocode
+---
+
+# Kilocode Instinct Enforce Changelog On Publish
+
+## Action
+
+Add or update a relevant .changeset/*.md file and modify script/publish.ts to enforce changelog requirements
+
+## Evidence
+
+- Workflow: enforce-changelog-on-publish
+- Seen in commit: fix: stop publishing without changelog updates
+
