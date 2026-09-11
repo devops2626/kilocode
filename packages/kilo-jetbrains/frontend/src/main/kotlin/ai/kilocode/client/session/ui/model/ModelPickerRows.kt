@@ -7,9 +7,12 @@ internal fun modelPickerRows(
     items: List<ModelPicker.Item>,
     favorites: List<ModelSelectionDto>,
     query: String,
+    allowEmpty: Boolean = false,
+    emptyText: String = KiloBundle.message("settings.models.notSet"),
+    includeSmall: Boolean = false,
 ): List<ModelPickerRow> {
     val q = query.trim()
-    val all = items.filterNot(ModelText::small)
+    val all = if (includeSmall) items else items.filterNot(ModelText::small)
     val filtered = all.filter {
         ModelSearch.matches(q, it.display) || ModelSearch.matches(q, it.id) || ModelSearch.matches(q, it.providerName)
     }
@@ -22,6 +25,9 @@ internal fun modelPickerRows(
         .toList()
         .sortedWith(compareBy<Pair<String, List<ModelPicker.Item>>> { ModelText.providerSort(it.first) })
     val out = mutableListOf<ModelPickerRow>()
+    if (allowEmpty && ModelSearch.matches(q, emptyText)) {
+        out += ModelPickerRow(null, null, favorite = false, emptyText = emptyText)
+    }
     if (q.isBlank()) {
         val byKey = all.associateBy { it.key }
         val fav = favorites.map { "${it.providerID}/${it.modelID}" }.mapNotNull(byKey::get)
@@ -42,9 +48,28 @@ internal fun modelPickerRows(
     return out
 }
 
+/**
+ * Ordered list of models the Ctrl+2 cycle shortcut steps through: favorites (in favorites order) when
+ * any exist, otherwise the picker's Recommended section (sorted by [ModelPicker.Item.recommendedIndex]).
+ * Empty when neither is available.
+ */
+internal fun modelCycle(
+    items: List<ModelPicker.Item>,
+    favorites: List<ModelSelectionDto>,
+    includeSmall: Boolean = false,
+): List<ModelPicker.Item> {
+    val all = if (includeSmall) items else items.filterNot(ModelText::small)
+    val byKey = all.associateBy { it.key }
+    val fav = favorites.map { "${it.providerID}/${it.modelID}" }.mapNotNull(byKey::get)
+    if (fav.isNotEmpty()) return fav
+    return all
+        .filter { it.recommendedIndex != null }
+        .sortedWith(compareBy<ModelPicker.Item> { it.recommendedIndex }.thenBy { it.display.lowercase() }.thenBy { it.id })
+}
+
 internal fun modelPickerIndex(rows: List<ModelPickerRow>, key: String?): Int {
-    if (key == null) return -1
-    return rows.indexOfFirst { it.item.key == key }
+    if (key == null) return rows.indexOfFirst { it.item == null }
+    return rows.indexOfFirst { it.item?.key == key }
 }
 
 internal fun modelPickerIndex(rows: List<ModelPickerRow>, index: Int): Int {

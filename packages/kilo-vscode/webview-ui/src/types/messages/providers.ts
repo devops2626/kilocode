@@ -16,8 +16,15 @@ export interface ProviderModel {
     input?: { text: boolean; image: boolean; audio: boolean; video: boolean; pdf: boolean }
   }
   options?: { description?: string }
+  autoRouting?: { models: string[] }
   recommendedIndex?: number
   isFree?: boolean
+  mayTrainOnYourPrompts?: boolean
+  hasUserByokAvailable?: boolean
+  terminalBench?: {
+    overallScore: number
+    avgAttemptCostUsd: number
+  }
   cost?: {
     input: number
     output: number
@@ -34,12 +41,24 @@ export interface Provider {
   models: Record<string, ProviderModel>
   source?: "env" | "config" | "custom" | "api"
   env?: string[]
+  metadata?: {
+    noteKey?: string
+    icon?: string
+    priority?: number
+  }
 }
 
 export interface ModelSelection {
   providerID: string
   modelID: string
 }
+
+export interface ModelUsage {
+  count: number
+  lastUsed: number
+}
+
+export type ModelUsageMap = Record<string, ModelUsage>
 
 export type ProviderAuthState = "api" | "oauth" | "wellknown"
 

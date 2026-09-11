@@ -3,9 +3,18 @@
  * Expects `n` in $/M tokens (as stored in model.cost.input / model.cost.output).
  */
 export function fmtPrice(n: number): string {
+  if (n < 0) return "—"
   if (n === 0) return "Free"
   if (n < 0.01) return `$${n.toFixed(4)}/1M`
   return `$${n.toFixed(2)}/1M`
+}
+
+export function fmtTerminalBenchScore(n: number): string {
+  return `${(n * 100).toFixed(1)}%`
+}
+
+export function fmtAttemptCost(n: number): string {
+  return `$${n.toFixed(2)}`
 }
 
 export function fmtCachedPrice(cost: { input: number; cache?: { read: number } }): string | null {

@@ -2,15 +2,13 @@ package ai.kilocode.client.settings.profile
 
 import ai.kilocode.client.app.KiloAppService
 import ai.kilocode.client.plugin.KiloBundle
+import ai.kilocode.client.settings.base.KiloReadyConfigurable
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.ModalityState
 import com.intellij.openapi.components.service
-import com.intellij.openapi.options.SearchableConfigurable
 import com.intellij.openapi.wm.IdeFocusManager
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -21,14 +19,13 @@ import javax.swing.JComponent
  *
  * Located at Settings -> Tools -> Kilo -> User Profile.
  *
- * Shows login / logout, current balance, personal/org account selector,
- * and a link to the Kilo dashboard. This is a status/action panel — it
+ * Shows login / logout, current balance, Kilo Pass, personal/org account selector,
+ * and account billing actions. This is a status/action panel — it
  * has no persistent settings, so [isModified] always returns false.
  */
-class UserProfileConfigurable : SearchableConfigurable {
+class UserProfileConfigurable : KiloReadyConfigurable() {
 
-    private var ui: JComponent? = null
-    private var scope: CoroutineScope? = null
+    private var ui: ProfileUi? = null
     private var watchJob: Job? = null
     private var focus = false
 
@@ -36,23 +33,25 @@ class UserProfileConfigurable : SearchableConfigurable {
 
     override fun getDisplayName(): String = KiloBundle.message("settings.profile.displayName")
 
-    override fun getPreferredFocusedComponent(): JComponent? = (ui as? ProfileUi)?.preferredFocus()
+    override fun preferredReady(): JComponent? = ui?.preferredFocus()
 
-    override fun focusOn(label: String) {
+    override fun focusReady(label: String) {
         if (label != FOCUS_ACCOUNT_COMBO) return
         focus = true
-        val panel = ui as? ProfileUi ?: return
+        val panel = ui ?: return
         requestFocus(panel)
     }
 
-    override fun createComponent(): JComponent {
-        val cs = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-        scope = cs
+    override fun createReadyComponent(cs: CoroutineScope): JComponent {
         val panel = buildPanel(cs)
         ui = panel
         startWatching(cs, panel)
-        if (focus) requestFocus(panel)
         return panel
+    }
+
+    override fun onReadyComponentCreated(component: JComponent) {
+        val panel = ui ?: return
+        if (focus) requestFocus(panel)
     }
 
     private fun requestFocus(panel: ProfileUi) {
@@ -79,45 +78,16 @@ class UserProfileConfigurable : SearchableConfigurable {
                 }
             }
         }
-        cs.launch {
-            app.connect()
-        }
     }
 
-    override fun isModified(): Boolean = false
-
-    override fun apply() = Unit
-
-    override fun reset() = Unit
-
-    override fun disposeUIResources() {
+    override fun disposeReadyComponent(component: JComponent) {
         // Dispose UI first to invalidate pending login attempts before scope cancellation.
-        // Capturing local refs before nulling fields so the EDT callback is self-contained.
-        val panel = ui as? ProfileUi
+        val panel = ui
         val job = watchJob
-        val cs = scope
         ui = null
         watchJob = null
-        scope = null
-
-        val app = ApplicationManager.getApplication()
-        if (panel != null) {
-            if (app.isDispatchThread) {
-                panel.dispose()
-                job?.cancel()
-                cs?.cancel()
-            } else {
-                // Schedule on EDT so dispose runs before scope cancel, as the plan requires.
-                app.invokeLater({
-                    panel.dispose()
-                    job?.cancel()
-                    cs?.cancel()
-                }, ModalityState.any())
-            }
-        } else {
-            job?.cancel()
-            cs?.cancel()
-        }
+        panel?.dispose()
+        job?.cancel()
     }
 
     companion object {

@@ -1,13 +1,20 @@
 import { describe, expect, test } from "bun:test"
+import { AsyncResource } from "async_hooks"
 import { Effect } from "effect"
 import fs from "fs/promises"
 import path from "path"
 import { Identifier } from "../../src/id/id"
 import { SessionID, MessageID, PartID } from "../../src/session/schema"
-import { ModelID, ProviderID } from "../../src/provider/schema"
-import { Instance } from "../../src/project/instance"
-import { WithInstance } from "../../src/project/with-instance"
-import { PlanFollowup, PlanFollowupRuntime } from "../../src/kilocode/plan-followup"
+import { ProviderV2 } from "@opencode-ai/core/provider"
+import { ModelV2 } from "@opencode-ai/core/model"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+import { SessionProjector } from "@opencode-ai/core/session/projector"
+import { Instance } from "../../src/kilocode/instance"
+import { provideTestInstance } from "../fixture/fixture"
+import { PlanFollowup } from "../../src/kilocode/plan-followup"
+import { KiloSessionPrompt } from "../../src/kilocode/session/prompt"
+import { makeRuntime } from "../../src/effect/run-service"
+import { Question } from "../../src/question"
 import { Session } from "../../src/session/session"
 import { MessageV2 } from "../../src/session/message-v2"
 import { SessionPrompt } from "../../src/session/prompt"
@@ -16,27 +23,47 @@ import { tmpdir } from "../fixture/fixture"
 
 Log.init({ print: false })
 
+const session = makeRuntime(
+  Session.Service,
+  LayerNode.compile(LayerNode.group([Session.node, SessionProjector.node])),
+)
 const sessions = {
   create: (input?: Parameters<Session.Interface["create"]>[0]) =>
-    Effect.runPromise(Session.Service.use((svc) => svc.create(input)).pipe(Effect.provide(Session.defaultLayer))),
+    session.runPromise((svc) => svc.create(input)),
   get: (id: SessionID) =>
-    Effect.runPromise(Session.Service.use((svc) => svc.get(id)).pipe(Effect.provide(Session.defaultLayer))),
+    session.runPromise((svc) => svc.get(id)),
   messages: (input: Parameters<Session.Interface["messages"]>[0]) =>
-    Effect.runPromise(Session.Service.use((svc) => svc.messages(input)).pipe(Effect.provide(Session.defaultLayer))),
+    session.runPromise((svc) => svc.messages(input)),
   updateMessage: <T extends MessageV2.Info>(msg: T) =>
-    Effect.runPromise(Session.Service.use((svc) => svc.updateMessage(msg)).pipe(Effect.provide(Session.defaultLayer))),
+    session.runPromise((svc) => svc.updateMessage(msg)),
   updatePart: <T extends MessageV2.Part>(part: T) =>
-    Effect.runPromise(Session.Service.use((svc) => svc.updatePart(part)).pipe(Effect.provide(Session.defaultLayer))),
+    session.runPromise((svc) => svc.updatePart(part)),
+}
+
+const runtime = makeRuntime(Question.Service, Question.defaultLayer)
+const questions = {
+  ask(input: Parameters<Question.Interface["ask"]>[0]) {
+    return runtime.runPromise((svc) => svc.ask(input))
+  },
+  list() {
+    return runtime.runPromise((svc) => svc.list())
+  },
+  reject(requestID: Parameters<Question.Interface["reject"]>[0]) {
+    return runtime.runPromise((svc) => svc.reject(requestID))
+  },
+  reply(input: Parameters<Question.Interface["reply"]>[0]) {
+    return runtime.runPromise((svc) => svc.reply(input))
+  },
 }
 
 const model = {
-  providerID: ProviderID.make("openai"),
-  modelID: ModelID.make("gpt-4"),
+  providerID: ProviderV2.ID.make("openai"),
+  modelID: ModelV2.ID.make("gpt-4"),
 }
 
 async function withInstance(fn: () => Promise<void>) {
   await using tmp = await tmpdir({ git: true })
-  await WithInstance.provide({ directory: tmp.path, fn })
+  await provideTestInstance({ directory: tmp.path, fn })
 }
 
 async function seed(input: {
@@ -122,11 +149,41 @@ async function seed(input: {
 
 async function waitQuestion(sessionID: string) {
   for (let i = 0; i < 50; i++) {
-    const list = await PlanFollowupRuntime.question.list()
+    const list = await questions.list()
     const question = list.find((item) => item.sessionID === sessionID)
     if (question) return question
     await Bun.sleep(10)
   }
+}
+
+function userMessage(input: { sessionID: SessionID; agent: string; text: string }) {
+  const id = MessageID.ascending()
+  return {
+    info: {
+      id,
+      role: "user",
+      sessionID: input.sessionID,
+      time: { created: Date.now() },
+      agent: input.agent,
+      model,
+    },
+    parts: [
+      {
+        id: PartID.ascending(),
+        messageID: id,
+        sessionID: input.sessionID,
+        type: "text",
+        text: input.text,
+      },
+    ],
+  } satisfies MessageV2.WithParts
+}
+
+function content(message: MessageV2.WithParts) {
+  return message.parts
+    .filter((part): part is MessageV2.TextPart => part.type === "text")
+    .map((part) => part.text)
+    .join("\n")
 }
 
 describe("plan_exit detection", () => {
@@ -138,13 +195,14 @@ describe("plan_exit detection", () => {
           {
             tool: "plan_exit",
             input: {},
-            output: "Plan is ready at .kilo/plans/plan.md. Ending planning turn.", // kilocode_change
+            output: "Plan is ready at .kilo/plans/plan.md. Ending planning turn.",
           },
         ],
       })
       expect(SessionPrompt.shouldAskPlanFollowup({ messages: seeded.messages, abort: AbortSignal.any([]) })).toBe(true)
 
       const pending = PlanFollowup.ask({
+        question: questions,
         sessionID: seeded.sessionID,
         messages: seeded.messages,
         abort: AbortSignal.any([]),
@@ -154,8 +212,124 @@ describe("plan_exit detection", () => {
       expect(question).toBeDefined()
       if (!question) return
       expect(question.questions[0].header).toBe("Implement")
-      await PlanFollowupRuntime.question.reject(question.id)
+      await questions.reject(question.id)
       await expect(pending).resolves.toBe("break")
+    }))
+
+  test("KiloSessionPrompt resolves plan follow-up through the supplied question service", () =>
+    withInstance(async () => {
+      const seeded = await seed({
+        text: "Here is the plan",
+        tools: [
+          {
+            tool: "plan_exit",
+            input: {},
+            output: "Plan is ready. Ending planning turn.",
+          },
+        ],
+      })
+
+      const result = await Effect.runPromise(
+        Effect.gen(function* () {
+          const question = yield* Question.Service
+          const pending = KiloSessionPrompt.askPlanFollowup({
+            sessionID: seeded.sessionID,
+            messages: seeded.messages,
+            abort: AbortSignal.any([]),
+            question,
+          })
+          const item = yield* Effect.gen(function* () {
+            for (let i = 0; i < 50; i++) {
+              const request = (yield* question.list()).find((entry) => entry.sessionID === seeded.sessionID)
+              if (request) return request
+              yield* Effect.sleep("10 millis")
+            }
+            throw new Error("timed out waiting for listener-local plan follow-up question")
+          })
+          yield* question.reply({ requestID: item.id, answers: [[PlanFollowup.ANSWER_CONTINUE]] })
+          return yield* Effect.promise(() => pending)
+        }).pipe(Effect.provide(Question.defaultLayer)),
+      )
+
+      expect(result).toBe("continue")
+    }))
+
+  test("KiloSessionPrompt cleans listener-local plan follow-up when aborted outside instance context", () => {
+    const outside = new AsyncResource("plan-followup-abort-test")
+    return withInstance(async () => {
+      const seeded = await seed({
+        text: "Here is the plan",
+        tools: [
+          {
+            tool: "plan_exit",
+            input: {},
+            output: "Plan is ready. Ending planning turn.",
+          },
+        ],
+      })
+
+      const result = await Effect.runPromise(
+        Effect.gen(function* () {
+          const question = yield* Question.Service
+          const abort = new AbortController()
+          const pending = KiloSessionPrompt.askPlanFollowup({
+            sessionID: seeded.sessionID,
+            messages: seeded.messages,
+            abort: abort.signal,
+            question,
+          })
+          yield* Effect.gen(function* () {
+            for (let i = 0; i < 50; i++) {
+              const request = (yield* question.list()).find((entry) => entry.sessionID === seeded.sessionID)
+              if (request) return request
+              yield* Effect.sleep("10 millis")
+            }
+            throw new Error("timed out waiting for listener-local plan follow-up question")
+          })
+          outside.runInAsyncScope(() => abort.abort())
+          const action = yield* Effect.promise(() =>
+            Promise.race([pending, Bun.sleep(1_000).then(() => "timeout" as const)]),
+          )
+          expect(yield* question.list()).toEqual([])
+          return action
+        }).pipe(Effect.provide(Question.defaultLayer)),
+      )
+
+      expect(result).toBe("break")
+    }).finally(() => outside.emitDestroy())
+  })
+
+  test("PlanFollowup skips prompt when aborted while resolving the plan", () =>
+    withInstance(async () => {
+      const seeded = await seed({
+        text: "Here is the plan",
+        tools: [
+          {
+            tool: "plan_exit",
+            input: {},
+            output: "Plan is ready. Ending planning turn.",
+          },
+        ],
+      })
+      const abort = new AbortController()
+      const pending = PlanFollowup.ask({
+        question: questions,
+        sessionID: seeded.sessionID,
+        messages: seeded.messages,
+        abort: abort.signal,
+      })
+      abort.abort()
+
+      const result = await Promise.race([pending, Bun.sleep(1_000).then(() => "timeout" as const)])
+      const list = () => questions.list().then((qs) => qs.filter((q) => q.sessionID === seeded.sessionID))
+      try {
+        expect(result).toBe("break")
+        expect(await list()).toEqual([])
+      } finally {
+        for (const item of await list()) {
+          await questions.reject(item.id)
+        }
+      }
     }))
 
   test("JetBrains client enables plan follow-up with custom answer", () =>
@@ -174,9 +348,12 @@ describe("plan_exit detection", () => {
           ],
         })
 
-        expect(SessionPrompt.shouldAskPlanFollowup({ messages: seeded.messages, abort: AbortSignal.any([]) })).toBe(true)
+        expect(SessionPrompt.shouldAskPlanFollowup({ messages: seeded.messages, abort: AbortSignal.any([]) })).toBe(
+          true,
+        )
 
         const pending = PlanFollowup.ask({
+          question: questions,
           sessionID: seeded.sessionID,
           messages: seeded.messages,
           abort: AbortSignal.any([]),
@@ -191,9 +368,15 @@ describe("plan_exit detection", () => {
         expect(question.questions[0].options.map((item) => item.label)).toEqual([
           PlanFollowup.ANSWER_NEW_SESSION,
           PlanFollowup.ANSWER_CONTINUE,
+          PlanFollowup.ANSWER_KEEP_REFINING,
         ])
-        expect(question.questions[0].options.find((item) => item.label === PlanFollowup.ANSWER_CONTINUE)?.mode).toBe("code")
-        await PlanFollowupRuntime.question.reject(question.id)
+        expect(question.questions[0].options.find((item) => item.label === PlanFollowup.ANSWER_CONTINUE)?.mode).toBe(
+          "code",
+        )
+        expect(
+          question.questions[0].options.find((item) => item.label === PlanFollowup.ANSWER_KEEP_REFINING)?.mode,
+        ).toBe("plan")
+        await questions.reject(question.id)
         await expect(pending).resolves.toBe("break")
       } finally {
         if (prev === undefined) delete process.env.KILO_CLIENT
@@ -215,6 +398,7 @@ describe("plan_exit detection", () => {
       })
 
       const pending = PlanFollowup.ask({
+        question: questions,
         sessionID: seeded.sessionID,
         messages: seeded.messages,
         abort: AbortSignal.any([]),
@@ -223,7 +407,7 @@ describe("plan_exit detection", () => {
       const question = await waitQuestion(seeded.sessionID)
       expect(question).toBeDefined()
       if (!question) return
-      await PlanFollowupRuntime.question.reply({
+      await questions.reply({
         requestID: question.id,
         answers: [[PlanFollowup.ANSWER_CONTINUE]],
       })
@@ -246,7 +430,7 @@ describe("plan_exit detection", () => {
         text: "Here is a partial plan, I have questions",
       })
       expect(SessionPrompt.shouldAskPlanFollowup({ messages: seeded.messages, abort: AbortSignal.any([]) })).toBe(false)
-      const list = await PlanFollowupRuntime.question.list()
+      const list = await questions.list()
       expect(list).toHaveLength(0)
     }))
 
@@ -325,7 +509,7 @@ describe("plan_exit detection", () => {
       expect(SessionPrompt.shouldAskPlanFollowup({ messages, abort: AbortSignal.any([]) })).toBe(false)
 
       // Confirm no questions were posted
-      const list = await PlanFollowupRuntime.question.list()
+      const list = await questions.list()
       expect(list).toHaveLength(0)
     }))
 
@@ -431,6 +615,7 @@ describe("plan_exit detection", () => {
       await Bun.write(plan, "Do implementation step 1")
 
       const pending = PlanFollowup.ask({
+        question: questions,
         sessionID: seeded.sessionID,
         messages: seeded.messages,
         abort: AbortSignal.any([]),
@@ -439,11 +624,283 @@ describe("plan_exit detection", () => {
       const question = await waitQuestion(seeded.sessionID)
       expect(question).toBeDefined()
       if (!question) return
-      await PlanFollowupRuntime.question.reply({
+      await questions.reply({
         requestID: question.id,
         answers: [[PlanFollowup.ANSWER_CONTINUE]],
       })
       await expect(pending).resolves.toBe("continue")
+    }))
+
+  test("plan reminder reuses custom plan_exit path when refining", () =>
+    withInstance(async () => {
+      const seeded = await seed({
+        tools: [
+          {
+            tool: "plan_exit",
+            input: { path: ".plans/fix.md" },
+            output: "Plan is ready at .plans/fix.md. Ending planning turn.",
+          },
+        ],
+      })
+      const file = path.join(Instance.worktree, ".plans", "fix.md")
+      await fs.mkdir(path.dirname(file), { recursive: true })
+      await Bun.write(file, "Do implementation step 1")
+
+      const session = await sessions.get(seeded.sessionID)
+      const id = MessageID.ascending()
+      const user: MessageV2.WithParts = {
+        info: {
+          id,
+          role: "user",
+          sessionID: seeded.sessionID,
+          time: { created: Date.now() },
+          agent: "Architect",
+          model,
+        },
+        parts: [
+          {
+            id: PartID.ascending(),
+            messageID: id,
+            sessionID: seeded.sessionID,
+            type: "text",
+            text: "Continue refining",
+          },
+        ],
+      }
+      await KiloSessionPrompt.insertPlanReminders({
+        agent: { name: "Architect", options: {} },
+        session,
+        userMessage: user,
+        messages: [...seeded.messages, user],
+      })
+
+      const part = user.parts.at(-1)
+      const text = part?.type === "text" ? part.text : ""
+      expect(text).toContain("The current saved plan file is")
+      expect(text.replaceAll(path.sep, "/")).toContain(".plans/fix.md")
+      expect(text).toContain("Project/user instructions about plan location")
+      expect(text).not.toContain("No plan file exists yet")
+    }))
+
+  test("native plan reminder creates the default plan directory", () =>
+    withInstance(async () => {
+      const session = await sessions.create({})
+      const dir = path.dirname(Session.plan(session, Instance.current))
+      await expect(fs.stat(dir).then(() => true, () => false)).resolves.toBe(false)
+
+      const id = MessageID.ascending()
+      const user: MessageV2.WithParts = {
+        info: {
+          id,
+          role: "user",
+          sessionID: session.id,
+          time: { created: Date.now() },
+          agent: "plan",
+          model,
+        },
+        parts: [
+          {
+            id: PartID.ascending(),
+            messageID: id,
+            sessionID: session.id,
+            type: "text",
+            text: "Create a plan.",
+          },
+        ],
+      }
+
+      await KiloSessionPrompt.insertPlanReminders({
+        agent: { name: "plan", options: {} },
+        session,
+        userMessage: user,
+        messages: [user],
+      })
+
+      await expect(fs.stat(dir).then((stat) => stat.isDirectory())).resolves.toBe(true)
+    }))
+
+  test("native plan reminder keeps in-chat approval for clients without follow-up support", () =>
+    withInstance(async () => {
+      const prev = process.env.KILO_CLIENT
+      try {
+        const session = await sessions.create({})
+
+        process.env.KILO_CLIENT = "vscode"
+        const supported = userMessage({ sessionID: session.id, agent: "plan", text: "Create a plan." })
+        await KiloSessionPrompt.insertPlanReminders({
+          agent: { name: "plan", options: {} },
+          session,
+          userMessage: supported,
+          messages: [supported],
+        })
+        const supportedText = content(supported)
+        expect(supportedText).toContain("client follow-up after plan_exit asks whether to implement")
+        expect(supportedText).not.toContain("Finalize and save the plan")
+
+        process.env.KILO_CLIENT = "acp"
+        const acp = userMessage({ sessionID: session.id, agent: "plan", text: "Create a plan." })
+        await KiloSessionPrompt.insertPlanReminders({
+          agent: { name: "plan", options: {} },
+          session,
+          userMessage: acp,
+          messages: [acp],
+        })
+        const text = content(acp)
+        expect(text).toContain("Finalize and save the plan")
+        expect(text).toContain("Continue refining")
+        expect(text).not.toContain("client follow-up after plan_exit asks")
+      } finally {
+        if (prev === undefined) delete process.env.KILO_CLIENT
+        else process.env.KILO_CLIENT = prev
+      }
+    }))
+
+  test("native plan reminder prefers project plan path instructions over fallback", () =>
+    withInstance(async () => {
+      const session = await sessions.create({})
+      const id = MessageID.ascending()
+      const user: MessageV2.WithParts = {
+        info: {
+          id,
+          role: "user",
+          sessionID: session.id,
+          time: { created: Date.now() },
+          agent: "plan",
+          model,
+        },
+        parts: [
+          {
+            id: PartID.ascending(),
+            messageID: id,
+            sessionID: session.id,
+            type: "text",
+            text: "Create a plan. AGENTS says plans go in plans/.",
+          },
+        ],
+      }
+
+      await KiloSessionPrompt.insertPlanReminders({
+        agent: { name: "plan", options: {} },
+        session,
+        userMessage: user,
+        messages: [user],
+      })
+
+      const part = user.parts.at(-1)
+      const text = part?.type === "text" ? part.text : ""
+      expect(text).toContain(`${session.time.created}-<concise-kebab-case-suffix>.md`)
+      expect(text).toContain(`${session.time.created}-database-cache-plan.md`)
+      expect(text).toContain("plans/ or .plans/")
+      expect(text).not.toContain(Session.plan(session, Instance.current))
+    }))
+
+  test("native plan reminder reuses custom plan_exit path when refining", () =>
+    withInstance(async () => {
+      const seeded = await seed({
+        tools: [
+          {
+            tool: "plan_exit",
+            input: { path: ".plans/fix.md" },
+            output: "Plan is ready at .plans/fix.md. Ending planning turn.",
+          },
+        ],
+      })
+      const file = path.join(Instance.worktree, ".plans", "fix.md")
+      await fs.mkdir(path.dirname(file), { recursive: true })
+      await Bun.write(file, "Do implementation step 1")
+
+      const session = await sessions.get(seeded.sessionID)
+      const id = MessageID.ascending()
+      const user: MessageV2.WithParts = {
+        info: {
+          id,
+          role: "user",
+          sessionID: seeded.sessionID,
+          time: { created: Date.now() },
+          agent: "plan",
+          model,
+        },
+        parts: [
+          {
+            id: PartID.ascending(),
+            messageID: id,
+            sessionID: seeded.sessionID,
+            type: "text",
+            text: "Continue refining",
+          },
+        ],
+      }
+      await KiloSessionPrompt.insertPlanReminders({
+        agent: { name: "plan", options: {} },
+        session,
+        userMessage: user,
+        messages: [...seeded.messages, user],
+      })
+
+      const text = content(user)
+      expect(text).toContain("The current saved plan file is")
+      expect(text.replaceAll(path.sep, "/")).toContain(".plans/fix.md")
+      expect(text).not.toContain(`${session.time.created}-<concise-kebab-case-suffix>.md`)
+      expect(text).not.toContain("No plan file exists yet")
+    }))
+
+  test("architect reminder prefers project plan path instructions over fallback", () =>
+    withInstance(async () => {
+      const session = await sessions.create({})
+      const id = MessageID.ascending()
+      const user: MessageV2.WithParts = {
+        info: {
+          id,
+          role: "user",
+          sessionID: session.id,
+          time: { created: Date.now() },
+          agent: "Architect",
+          model,
+        },
+        parts: [
+          {
+            id: PartID.ascending(),
+            messageID: id,
+            sessionID: session.id,
+            type: "text",
+            text: "Create a plan. AGENTS says plans go in plans/.",
+          },
+        ],
+      }
+
+      await KiloSessionPrompt.insertPlanReminders({
+        agent: { name: "Architect", options: {} },
+        session,
+        userMessage: user,
+        messages: [user],
+      })
+
+      const part = user.parts.at(-1)
+      const text = part?.type === "text" ? part.text : ""
+      expect(text).toContain(`${session.time.created}-<concise-kebab-case-suffix>.md`)
+      expect(text).toContain("plans/ or .plans/")
+      expect(text).not.toContain("Default to")
+      expect(text).not.toContain("A fallback plan file exists")
+    }))
+
+  test("plan reminders are separated from user text with blank lines", () =>
+    withInstance(async () => {
+      const session = await sessions.create({})
+      const user = userMessage({ sessionID: session.id, agent: "plan", text: "write this to a file:" })
+      await KiloSessionPrompt.insertPlanReminders({
+        agent: { name: "plan", options: {} },
+        session,
+        userMessage: user,
+        messages: [user],
+      })
+
+      const parts = user.parts.filter((p): p is MessageV2.TextPart => p.type === "text")
+      expect(parts).toHaveLength(3)
+      expect(parts[0].text).toBe("write this to a file:")
+      for (const part of parts.slice(1)) {
+        expect(part.synthetic).toBe(true)
+        expect(part.text.startsWith("\n\n<system-reminder>")).toBe(true)
+      }
     }))
 
   test("PlanFollowup.ask shows prompt when plan text is on earlier assistant and last assistant is empty", () =>
@@ -533,6 +990,7 @@ describe("plan_exit detection", () => {
 
       // PlanFollowup.ask should find plan text from the earlier assistant and show prompt
       const pending = PlanFollowup.ask({
+        question: questions,
         sessionID: session.id,
         messages,
         abort: AbortSignal.any([]),
@@ -542,7 +1000,7 @@ describe("plan_exit detection", () => {
       expect(question).toBeDefined()
       if (!question) return
       expect(question.questions[0].header).toBe("Implement")
-      await PlanFollowupRuntime.question.reply({
+      await questions.reply({
         requestID: question.id,
         answers: [[PlanFollowup.ANSWER_CONTINUE]],
       })

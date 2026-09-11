@@ -3,7 +3,16 @@ import { useTerminalDimensions } from "@opentui/solid"
 import { createMemo, Show } from "solid-js"
 import { useTheme } from "@tui/context/theme"
 import type { Model } from "@kilocode/sdk/v2"
-import { avgPrice, fmtCachedPrice, fmtContext, fmtDate, fmtPrice } from "./model-info-panel-utils"
+import { FreeModelDisclosure } from "./free-model-disclosure"
+import {
+  avgPrice,
+  fmtAttemptCost,
+  fmtCachedPrice,
+  fmtContext,
+  fmtDate,
+  fmtPrice,
+  fmtScore,
+} from "./model-info-panel-utils"
 
 interface Props {
   model: Model
@@ -18,8 +27,9 @@ export function ModelInfoPanel(props: Props) {
   const maxHeight = createMemo(() => Math.floor(dimensions().height / 2) - 3)
 
   const cost = () => m().cost
-  const cached = () => (cost() ? fmtCachedPrice(cost()) : null)
-  const avg = () => (cost() ? avgPrice(cost()) : undefined)
+  const hasPricing = () => m().cost?.input > 0 || m().cost?.output > 0
+  const cached = () => (cost() && hasPricing() ? fmtCachedPrice(cost()) : null)
+  const avg = () => (cost() && hasPricing() ? avgPrice(cost()) : undefined)
   const caps = () => m().capabilities
   const inputs = () => caps()?.input
   const outputs = () => caps()?.output
@@ -66,9 +76,14 @@ export function ModelInfoPanel(props: Props) {
           </text>
           <text fg={theme.textMuted}>{props.provider ?? m().providerID ?? ""}</text>
         </box>
-        <Show when={m().isFree}>
+        <Show when={FreeModelDisclosure.hasByok(m())}>
           <box>
-            <text fg={theme.text}>Free</text>
+            <text fg={theme.text}>{FreeModelDisclosure.byok}</text>
+          </box>
+        </Show>
+        <Show when={FreeModelDisclosure.collectsData(m())}>
+          <box>
+            <text fg={theme.text}>{FreeModelDisclosure.panel}</text>
           </box>
         </Show>
         <Show when={m().family}>
@@ -85,31 +100,50 @@ export function ModelInfoPanel(props: Props) {
         </Show>
         <Show when={!m().isFree}>
           <box>
-            <box flexDirection="row" justifyContent="space-between">
-              <text fg={theme.textMuted}>Input</text>
-              <text fg={theme.text}>{m() ? fmtPrice(m().cost.input) : "—"}</text>
-            </box>
-            <box flexDirection="row" justifyContent="space-between">
-              <text fg={theme.textMuted}>Output</text>
-              <text fg={theme.text}>{m() ? fmtPrice(m().cost.output) : "—"}</text>
-            </box>
-            <Show when={cached()}>
+            <Show when={hasPricing()}>
               <box flexDirection="row" justifyContent="space-between">
-                <text fg={theme.textMuted}>Cached</text>
-                <text fg={theme.text}>{cached()}</text>
+                <text fg={theme.textMuted}>Input</text>
+                <text fg={theme.text}>{m() ? fmtPrice(m().cost.input) : "—"}</text>
               </box>
-            </Show>
-            <Show when={avg() !== undefined}>
               <box flexDirection="row" justifyContent="space-between">
-                <text fg={theme.textMuted}>Avg Cost</text>
-                <text fg={theme.text}>{m() ? fmtPrice(avg()!) : "—"}</text>
+                <text fg={theme.textMuted}>Output</text>
+                <text fg={theme.text}>{m() ? fmtPrice(m().cost.output) : "—"}</text>
               </box>
+              <Show when={cached()}>
+                <box flexDirection="row" justifyContent="space-between">
+                  <text fg={theme.textMuted}>Cached</text>
+                  <text fg={theme.text}>{cached()}</text>
+                </box>
+              </Show>
+              <Show when={avg() !== undefined}>
+                <box flexDirection="row" justifyContent="space-between">
+                  <text fg={theme.textMuted}>Avg Cost</text>
+                  <text fg={theme.text}>{m() ? fmtPrice(avg()!) : "—"}</text>
+                </box>
+              </Show>
             </Show>
             <box flexDirection="row" justifyContent="space-between">
               <text fg={theme.textMuted}>Context</text>
               <text fg={theme.text}>{m() ? fmtContext(m().limit.context) : "—"}</text>
             </box>
           </box>
+        </Show>
+        <Show when={m().terminalBench}>
+          {(bench) => (
+            <box>
+              <text fg={theme.text}>
+                <b>Terminal Bench 2.0</b>
+              </text>
+              <box flexDirection="row" justifyContent="space-between">
+                <text fg={theme.textMuted}>Completion</text>
+                <text fg={theme.text}>{fmtScore(bench().overallScore)}</text>
+              </box>
+              <box flexDirection="row" justifyContent="space-between">
+                <text fg={theme.textMuted}>Cost / attempt</text>
+                <text fg={theme.text}>{fmtAttemptCost(bench().avgAttemptCostUsd)}</text>
+              </box>
+            </box>
+          )}
         </Show>
         <Show when={caps()?.reasoning || inputLine() || outputLine()}>
           <box flexDirection="column">

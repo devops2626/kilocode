@@ -1,15 +1,20 @@
 /**
- * Pure data-transform helpers that strip heavy tool metadata from
- * message parts before sending them to the webview via postMessage.
+ * Pure data-transform helpers that strip heavy message metadata before
+ * sending transcripts to the webview via postMessage.
  *
  * The webview communicates with the extension over VS Code's IPC bridge.
- * Every message is JSON-serialised → deserialised on each side.  Tool parts
+ * Every message is JSON-serialised → deserialised on each side. Tool parts
  * from edit, apply_patch, multiedit and write often carry full file contents
- * (before/after snapshots, patch text, written content).  Sending those on
- * every session switch makes serialisation the dominant bottleneck.
+ * (before/after snapshots, patch text, written content). User message summaries
+ * and reasoning parts can also carry patches and encrypted provider metadata
+ * that the webview does not use. Sending those on every session switch makes
+ * serialisation the dominant bottleneck.
  *
  * This module strips fields the webview never (or rarely) needs while keeping
- * everything required to render collapsed tool-part headers and diagnostics.
+ * everything required to render transcript summaries, tool details and
+ * diagnostics. It transforms outgoing webview copies only: backend session
+ * storage remains the source of truth for continuation, caching, forks and
+ * exports.
  *
  * No vscode dependency — safe to unit-test in isolation.
  */
@@ -68,6 +73,7 @@ function slimEdit(state: Record<string, unknown>): Record<string, unknown> {
     }
   }
   if (meta.diagnostics) result.diagnostics = meta.diagnostics
+  if (meta.approval) result.approval = meta.approval
   next.metadata = result
   return next
 }
@@ -79,6 +85,7 @@ function slimPatch(state: Record<string, unknown>): Record<string, unknown> {
   if (isObj(meta)) {
     const slim: Record<string, unknown> = {}
     if (meta.diagnostics) slim.diagnostics = meta.diagnostics
+    if (meta.approval) slim.approval = meta.approval
     if (Array.isArray(meta.files)) {
       slim.files = (meta.files as Record<string, unknown>[]).map((f) => {
         const diff = patch(f.patch) ?? patch(f.diff)
@@ -110,6 +117,7 @@ function slimMultiedit(state: Record<string, unknown>): Record<string, unknown> 
   if (isObj(meta)) {
     const slim: Record<string, unknown> = {}
     if (meta.diagnostics) slim.diagnostics = meta.diagnostics
+    if (meta.approval) slim.approval = meta.approval
     if (Array.isArray(meta.results)) {
       slim.results = (meta.results as Record<string, unknown>[]).map((r) => {
         const rs: Record<string, unknown> = {}
@@ -144,6 +152,7 @@ function slimWrite(state: Record<string, unknown>): Record<string, unknown> {
     if (meta.filepath) slim.filepath = meta.filepath
     if (meta.exists !== undefined) slim.exists = meta.exists
     if (meta.diagnostics) slim.diagnostics = meta.diagnostics
+    if (meta.approval) slim.approval = meta.approval
     const fd = meta.filediff
     if (isObj(fd)) {
       slim.filediff = {
@@ -181,6 +190,24 @@ function slimBash(state: Record<string, unknown>): Record<string, unknown> {
 // Public API
 // ---------------------------------------------------------------------------
 
+/** Strip patches used only by the explicit turn-diff fetch from message summaries. */
+export function slimInfo<T>(info: T): T {
+  if (!info || typeof info !== "object") return info
+
+  const obj = info as Record<string, unknown>
+  const summary = obj.summary
+  if (!isObj(summary) || !Array.isArray(summary.diffs)) return info
+  if (!summary.diffs.some((diff) => isObj(diff) && "patch" in diff)) return info
+
+  const diffs = summary.diffs.map((diff) => {
+    if (!isObj(diff) || !("patch" in diff)) return diff
+    const next = { ...diff }
+    delete next.patch
+    return next
+  })
+  return { ...obj, summary: { ...summary, diffs } } as T
+}
+
 const slimmers: Record<string, (state: Record<string, unknown>) => Record<string, unknown>> = {
   read: slimOutput,
   list: slimOutput,
@@ -191,13 +218,27 @@ const slimmers: Record<string, (state: Record<string, unknown>) => Record<string
   multiedit: slimMultiedit,
   write: slimWrite,
   bash: slimBash,
+  task: slimOutput,
 }
 
-/** Strip heavy metadata from a single tool part; pass-through for non-tool parts. */
+/** Strip provider metadata that the webview never reads from reasoning parts. */
+function slimReasoning<T>(part: T, obj: Record<string, unknown>): T {
+  const meta = obj.metadata
+  if (!isObj(meta)) return part
+  const openai = meta.openai
+  if (!isObj(openai) || !("reasoningEncryptedContent" in openai)) return part
+
+  const next = { ...openai }
+  delete next.reasoningEncryptedContent
+  return { ...obj, metadata: { ...meta, openai: next } } as T
+}
+
+/** Strip heavy metadata from a single transcript part. */
 export function slimPart<T>(part: T): T {
   if (!part || typeof part !== "object") return part
 
   const obj = part as Record<string, unknown>
+  if (obj.type === "reasoning") return slimReasoning(part, obj)
   if (obj.type !== "tool") return part
 
   const tool = obj.tool

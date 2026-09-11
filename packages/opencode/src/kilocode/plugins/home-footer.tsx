@@ -7,46 +7,11 @@
  * and version information.
  */
 import type { TuiPlugin, TuiPluginApi, TuiPluginModule } from "@kilocode/plugin/tui"
-import { createMemo, createSignal, Match, onCleanup, onMount, Show, Switch } from "solid-js"
+import { createMemo, Match, Show, Switch } from "solid-js"
 import { Global } from "@opencode-ai/core/global"
-import { indexingEnabled } from "../indexing-feature"
-import { formatIndexingLabel } from "../indexing-label"
-import { useSync } from "@/cli/cmd/tui/context/sync"
+import { RemoteIndicator } from "@/kilocode/remote-tui"
 
 const id = "internal:kilo-home-footer"
-
-type Status = {
-  enabled: boolean
-  connected: boolean
-}
-
-// ---------------------------------------------------------------------------
-// RemoteIndicator – adapted from @/kilocode/remote-tui for plugin API usage
-// ---------------------------------------------------------------------------
-
-function RemoteIndicator(props: { api: TuiPluginApi; kilo: boolean }) {
-  const theme = () => props.api.theme.current
-  const [status, setStatus] = createSignal<Status | null>(null)
-
-  onMount(() => {
-    void props.api.client.remote
-      .status()
-      .then((res: { data?: Status }) => {
-        if (res.data) setStatus(res.data)
-      })
-      .catch(() => undefined)
-    const off = props.api.event.on("kilo-sessions.remote-status-changed", (evt) => setStatus(evt.properties))
-    onCleanup(off)
-  })
-
-  return (
-    <Show when={props.kilo && status()?.enabled}>
-      <text fg={status()?.connected ? theme().success : theme().warning}>
-        ◆ Remote{status()?.connected ? "" : " …"}
-      </text>
-    </Show>
-  )
-}
 
 // ---------------------------------------------------------------------------
 // Sub-components (mirror upstream home/footer with kilo additions)
@@ -108,18 +73,7 @@ function Version(props: { api: TuiPluginApi }) {
 
 function View(props: { api: TuiPluginApi }) {
   const kilo = createMemo(() => props.api.state.provider.some((p) => p.id === "kilo"))
-  const theme = () => props.api.theme.current
-  const sync = useSync()
-  const indexingOn = createMemo(() => indexingEnabled(sync.data.config))
-  const indexing = createMemo(() => sync.data.indexing)
-  const indexingLabel = createMemo(() => formatIndexingLabel(indexing()))
-  const indexingColor = createMemo(() => {
-    if (indexing().state === "Complete") return theme().success
-    if (indexing().state === "Error") return theme().error
-    if (indexing().state === "In Progress") return theme().warning
-    if (indexing().state === "Standby") return theme().textMuted
-    return theme().textMuted
-  })
+  const sdk = { client: props.api.client }
 
   return (
     <box
@@ -134,11 +88,13 @@ function View(props: { api: TuiPluginApi }) {
     >
       <Directory api={props.api} />
       <box gap={1} flexDirection="row" flexShrink={0}>
-        <RemoteIndicator api={props.api} kilo={kilo()} />
+        <RemoteIndicator
+          sdk={sdk}
+          theme={props.api.theme.current}
+          kilo={kilo()}
+          event={props.api.event}
+        />
         <Mcp api={props.api} />
-        <Show when={indexingOn()}>
-          <text fg={indexingColor()}>{indexingLabel().slice(0, 48)}</text>
-        </Show>
       </box>
       <box flexGrow={1} />
       <Version api={props.api} />

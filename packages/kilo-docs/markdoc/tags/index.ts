@@ -1,6 +1,7 @@
 /* Use this file to export your markdoc tags */
 export * from "./callout.markdoc"
 export * from "./codicon.markdoc"
+export * from "./copy-line.markdoc"
 export * from "./tabs.markdoc"
 export * from "./icon.markdoc"
 export * from "./image.markdoc"
@@ -10,3 +11,4 @@ export * from "./video.markdoc"
 export * from "./youtube.markdoc"
 export * from "./flow-diagram.markdoc"
 export * from "./browser-frame.markdoc"
+export * from "./linebreak.markdoc"

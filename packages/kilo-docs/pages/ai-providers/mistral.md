@@ -20,14 +20,6 @@ Kilo Code supports accessing models through the Mistral AI API, including both s
 ## Configuration in Kilo Code
 
 {% tabs %}
-{% tab label="VSCode (Legacy)" %}
-
-1.  **Open Kilo Code Settings:** Click the gear icon ({% codicon name="gear" /%}) in the Kilo Code panel.
-2.  **Select Provider:** Choose "Mistral" from the "API Provider" dropdown.
-3.  **Enter API Key:** Paste your Mistral API key into the "Mistral API Key" field if you're using a `mistral` model. If you intend to use `codestral-latest`, see the "Codestral" section below.
-4.  **Select Model:** Choose your desired model from the "Model" dropdown.
-
-{% /tab %}
 {% tab label="VSCode" %}
 
 Open **Settings** (gear icon) and go to the **Providers** tab to add Mistral and enter your API key.
@@ -72,7 +64,7 @@ Then set your default model:
 
 Mistral's adjustable reasoning support is exposed only for reasoning-capable Mistral Small 4 models: `mistral-small-2603` and `mistral-small-latest`. When one of these models is selected, Kilo offers a `high` variant that sends `reasoningEffort: "high"` to the Mistral provider.
 
-Other Mistral models do not get automatic reasoning variants, even if they appear in the same provider. See Mistral's [adjustable reasoning documentation](https://docs.mistral.ai/capabilities/reasoning/adjustable) for provider-level details.
+Other Mistral models do not get automatic reasoning variants, even if they appear in the same provider. See Mistral's [reasoning documentation](https://docs.mistral.ai/studio-api/conversations/reasoning) for provider-level details.
 
 ## Using Codestral
 

@@ -1,4 +1,4 @@
-import { createEffect, For, Match, on, onCleanup, Show, Switch, type JSX } from "solid-js"
+import { createEffect, For, Match, on, onCleanup, onMount, Show, Switch, type JSX } from "solid-js"
 import { animate, type AnimationPlaybackControls } from "motion"
 import { useI18n } from "../context/i18n"
 import { createStore } from "solid-js/store"
@@ -24,46 +24,127 @@ const isTriggerTitle = (val: any): val is TriggerTitle => {
 
 export interface BasicToolProps {
   icon: IconProps["name"]
+  iconNode?: JSX.Element // kilocode_change
   trigger: TriggerTitle | JSX.Element
   children?: JSX.Element
   status?: string
   hideDetails?: boolean
   defaultOpen?: boolean
+  open?: boolean
+  onOpenChange?: (open: boolean) => void
   forceOpen?: boolean
   defer?: boolean
+  retainDetails?: boolean // kilocode_change
+  hasDetails?: boolean // kilocode_change
   locked?: boolean
   animated?: boolean
   allowPendingToggle?: boolean // kilocode_change
   onSubtitleClick?: () => void
-  onOpenChange?: (open: boolean) => void // kilocode_change
   onTriggerClick?: JSX.EventHandlerUnion<HTMLElement, MouseEvent>
   triggerHref?: string
   clickable?: boolean
 }
 
 const SPRING = { type: "spring" as const, visualDuration: 0.35, bounce: 0 }
+const deferredMounts: Array<{ active: boolean; fn: () => void }> = []
+let deferredFrame: number | undefined
+
+// kilocode_change start
+// Mount deferred tool bodies within a per-frame time budget. Mounting one body
+// per frame kept each diff card's render off a single frame, but an expanded
+// transcript with many cards then needed one frame per card before everything
+// was visible. Spend a fixed budget per frame so cheap bodies mount together.
+// A body whose duration exceeds the budget ends that frame, so later bodies
+// wait for the next one.
+const DEFERRED_MOUNT_BUDGET_MS = 12
+
+function flushDeferredMounts() {
+  const deadline = performance.now() + DEFERRED_MOUNT_BUDGET_MS
+  // Re-arm in `finally`: a throw from one body must not leave `deferredFrame`
+  // pointing at an already-fired frame, which would stall every later mount.
+  try {
+    while (deferredMounts.length > 0) {
+      // Timeline tools are mounted top-to-bottom, but the viewport starts at the latest turn.
+      // Pop from the end so heavy default-open bodies near the bottom become interactive first.
+      const item = deferredMounts.pop()!
+      if (item.active) item.fn()
+      if (performance.now() >= deadline) break
+    }
+  } finally {
+    deferredFrame = deferredMounts.length > 0 ? requestAnimationFrame(flushDeferredMounts) : undefined
+  }
+}
+// kilocode_change end
+
+function scheduleDeferredFlush() {
+  if (deferredFrame !== undefined) return
+  deferredFrame = requestAnimationFrame(() => {
+    deferredFrame = requestAnimationFrame(flushDeferredMounts)
+  })
+}
+
+function scheduleDeferredMount(fn: () => void) {
+  const item = { active: true, fn }
+  deferredMounts.push(item)
+  scheduleDeferredFlush()
+  return () => {
+    item.active = false
+  }
+}
+
+function scheduleFrameMount(fn: () => void) {
+  const frame = requestAnimationFrame(fn)
+  return () => cancelAnimationFrame(frame)
+}
 
 export function BasicTool(props: BasicToolProps) {
   const [state, setState] = createStore({
     open: props.defaultOpen ?? false,
-    ready: props.defaultOpen ?? false,
+    ready: !props.defer && (props.defaultOpen ?? false),
   })
-  const open = () => state.open
+  const open = () => props.open ?? state.open
   const ready = () => state.ready
   const pending = () => props.status === "pending" || props.status === "running"
+  // kilocode_change start - testing for children must not evaluate them. Reading
+  // the `children` getter constructs the whole collapsed body tree (and runs
+  // Markdown/diff parsing inside it) on every mount, even while closed, which
+  // dominated the cost of mounting tool cards. `"children" in props` only checks
+  // presence, keeping the body lazy without changing how it renders.
+  const hasChildren = () => "children" in props
+  // kilocode_change end
+  const hasDetails = () => props.hasDetails ?? !!hasChildren() // kilocode_change
 
-  let frame: number | undefined
+  let cancelReady: (() => void) | undefined
 
   const cancel = () => {
-    if (frame === undefined) return
-    cancelAnimationFrame(frame)
-    frame = undefined
+    cancelReady?.()
+    cancelReady = undefined
+  }
+
+  const scheduleReady = (initial = false) => {
+    cancel()
+    cancelReady = (initial ? scheduleDeferredMount : scheduleFrameMount)(() => {
+      cancelReady = undefined
+      if (!open()) return
+      setState("ready", true)
+    })
   }
 
   onCleanup(cancel)
 
+  onMount(() => {
+    if (props.defer && open()) scheduleReady(true)
+  })
+
+  const setOpen = (value: boolean) => {
+    if (props.open === undefined) setState("open", value)
+    props.onOpenChange?.(value)
+  }
+
   createEffect(() => {
-    if (props.forceOpen) setState("open", true)
+    if (!props.forceOpen) return
+    if (open()) return
+    setOpen(true)
   })
 
   createEffect(
@@ -73,16 +154,11 @@ export function BasicTool(props: BasicToolProps) {
         if (!props.defer) return
         if (!value) {
           cancel()
-          setState("ready", false)
+          if (!props.retainDetails) setState("ready", false) // kilocode_change
           return
         }
 
-        cancel()
-        frame = requestAnimationFrame(() => {
-          frame = undefined
-          if (!open()) return
-          setState("ready", true)
-        })
+        scheduleReady()
       },
       { defer: true },
     ),
@@ -124,9 +200,17 @@ export function BasicTool(props: BasicToolProps) {
     if (pending() && !props.allowPendingToggle) return // kilocode_change
     if (props.hideDetails) return // kilocode_change
     if (props.locked && !value) return
-    setState("open", value)
+    setOpen(value)
     props.onOpenChange?.(value) // kilocode_change
   }
+
+  // kilocode_change start
+  const end = (event: AnimationEvent) => {
+    if (event.target !== event.currentTarget) return
+    if (!props.retainDetails || open()) return
+    setState("ready", false)
+  }
+  // kilocode_change end
 
   const trigger = () => (
     <div
@@ -137,7 +221,7 @@ export function BasicTool(props: BasicToolProps) {
       <div data-slot="basic-tool-tool-trigger-content">
         {/* kilocode_change start */}
         <span data-slot="basic-tool-icon">
-          <Icon name={props.icon} size="small" />
+          {props.iconNode ?? <Icon name={props.icon} size="small" />}
         </span>
         {/* kilocode_change end */}
         <div data-slot="basic-tool-tool-info">
@@ -199,7 +283,14 @@ export function BasicTool(props: BasicToolProps) {
         </div>
       </div>
       {/* kilocode_change start */}
-      <Show when={props.children && !props.hideDetails && !props.locked && (!pending() || props.allowPendingToggle)}>
+      <Show
+        when={
+          (hasChildren() || hasDetails()) &&
+          !props.hideDetails &&
+          !props.locked &&
+          (!pending() || props.allowPendingToggle)
+        }
+      >
         <Collapsible.Arrow />
       </Show>
       {/* kilocode_change end */}
@@ -230,7 +321,7 @@ export function BasicTool(props: BasicToolProps) {
           </Collapsible.Trigger>
         )}
       </Show>
-      <Show when={props.animated && props.children && !props.hideDetails}>
+      <Show when={props.animated && hasChildren() && !props.hideDetails}>
         <div
           ref={contentRef}
           data-slot="collapsible-content"
@@ -240,14 +331,16 @@ export function BasicTool(props: BasicToolProps) {
             overflow: initialOpen ? "visible" : "hidden",
           }}
         >
-          {props.children}
+          <Show when={!props.defer || ready()}>{props.children}</Show>
         </div>
       </Show>
-      <Show when={!props.animated && props.children && !props.hideDetails}>
-        <Collapsible.Content>
+      {/* kilocode_change start */}
+      <Show when={!props.animated && (hasChildren() || hasDetails()) && !props.hideDetails}>
+        <Collapsible.Content onAnimationEnd={end}>
           <Show when={!props.defer || ready()}>{props.children}</Show>
         </Collapsible.Content>
       </Show>
+      {/* kilocode_change end */}
     </Collapsible>
   )
 }

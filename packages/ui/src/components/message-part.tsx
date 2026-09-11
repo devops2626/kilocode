@@ -57,6 +57,31 @@ import { patchFiles } from "./apply-patch-file"
 import { animate } from "motion"
 import { useLocation } from "@solidjs/router"
 import { attached, inline, kind } from "./message-file"
+import { readPartText } from "./message-part-text"
+
+async function writeClipboard(text: string): Promise<boolean> {
+  const body = typeof document === "undefined" ? undefined : document.body
+  if (body) {
+    const textarea = document.createElement("textarea")
+    textarea.value = text
+    textarea.setAttribute("readonly", "")
+    textarea.style.position = "fixed"
+    textarea.style.opacity = "0"
+    textarea.style.pointerEvents = "none"
+    body.appendChild(textarea)
+    textarea.select()
+    const copied = document.execCommand("copy")
+    body.removeChild(textarea)
+    if (copied) return true
+  }
+
+  const clipboard = typeof navigator === "undefined" ? undefined : navigator.clipboard
+  if (!clipboard?.writeText) return false
+  return clipboard.writeText(text).then(
+    () => true,
+    () => false,
+  )
+}
 
 function ShellSubmessage(props: { text: string; animate?: boolean }) {
   let widthRef: HTMLSpanElement | undefined
@@ -151,6 +176,11 @@ export interface MessagePartProps {
   message: MessageType
   hideDetails?: boolean
   defaultOpen?: boolean
+  toolOpen?: boolean
+  onToolOpenChange?: (open: boolean) => void
+  deferToolContent?: boolean
+  virtualizeDiff?: boolean
+  onContentRendered?: () => void
   showAssistantCopyPartID?: string | null
   turnDurationMs?: number
 }
@@ -160,13 +190,14 @@ export type PartComponent = Component<MessagePartProps>
 export const PART_MAPPING: Record<string, PartComponent | undefined> = {}
 
 const TEXT_RENDER_PACE_MS = 24
+const TEXT_RENDER_IMMEDIATE = 512
 const TEXT_RENDER_SNAP = /[\s.,!?;:)\]]/
 
 function step(size: number) {
   if (size <= 12) return 2
   if (size <= 48) return 4
   if (size <= 96) return 8
-  return Math.min(24, Math.ceil(size / 8))
+  return Math.min(256, Math.ceil(size / 4))
 }
 
 function next(text: string, start: number) {
@@ -205,6 +236,10 @@ function createPacedValue(getValue: () => string, live?: () => boolean) {
       sync(text)
       return
     }
+    if (text.length - shown.length <= TEXT_RENDER_IMMEDIATE) {
+      sync(text)
+      return
+    }
     const end = next(text, shown.length)
     sync(text.slice(0, end))
     if (end < text.length) timeout = setTimeout(run, TEXT_RENDER_PACE_MS)
@@ -218,6 +253,11 @@ function createPacedValue(getValue: () => string, live?: () => boolean) {
       return
     }
     if (!text.startsWith(shown) || text.length < shown.length) {
+      clear()
+      sync(text)
+      return
+    }
+    if (text.length - shown.length <= TEXT_RENDER_IMMEDIATE) {
       clear()
       sync(text)
       return
@@ -265,6 +305,7 @@ function getDirectory(path: string | undefined) {
 }
 
 import type { IconProps } from "./icon"
+import { normalize, resolveFileDiff } from "./session-diff"
 
 export type ToolInfo = {
   icon: IconProps["name"]
@@ -318,7 +359,17 @@ function taskAgent(
   }
 }
 
-export function getToolInfo(tool: string, input: any = {}): ToolInfo {
+function webSearchProviderLabel(provider: unknown) {
+  if (provider === "parallel") return "Parallel Web Search"
+  if (provider === "exa") return "Exa Web Search"
+  return "Web Search"
+}
+
+export function getToolInfo(
+  tool: string,
+  input: any = {},
+  metadata: Record<string, unknown> | undefined = {},
+): ToolInfo {
   const i18n = useI18n()
   switch (tool) {
     case "read":
@@ -354,7 +405,7 @@ export function getToolInfo(tool: string, input: any = {}): ToolInfo {
     case "websearch":
       return {
         icon: "window-cursor",
-        title: i18n.t("ui.tool.websearch"),
+        title: webSearchProviderLabel(metadata?.provider),
         subtitle: input.query,
       }
     case "task": {
@@ -476,12 +527,12 @@ function same<T>(a: readonly T[] | undefined, b: readonly T[] | undefined) {
   return a.every((x, i) => x === b[i])
 }
 
-type PartRef = {
+export type PartRef = {
   messageID: string
   partID: string
 }
 
-type PartGroup =
+export type PartGroup =
   | {
       key: string
       type: "part"
@@ -510,14 +561,14 @@ function sameGroup(a: PartGroup, b: PartGroup) {
   return a.refs.every((ref, i) => sameRef(ref, b.refs[i]!))
 }
 
-function sameGroups(a: readonly PartGroup[] | undefined, b: readonly PartGroup[] | undefined) {
+export function sameGroups(a: readonly PartGroup[] | undefined, b: readonly PartGroup[] | undefined) {
   if (a === b) return true
   if (!a || !b) return false
   if (a.length !== b.length) return false
   return a.every((item, i) => sameGroup(item, b[i]!))
 }
 
-function groupParts(parts: { messageID: string; part: PartType }[]) {
+export function groupParts(parts: { messageID: string; part: PartType }[]) {
   const result: PartGroup[] = []
   let start = -1
 
@@ -565,7 +616,7 @@ function index<T extends { id: string }>(items: readonly T[]) {
   return new Map(items.map((item) => [item.id, item] as const))
 }
 
-function renderable(part: PartType, showReasoningSummaries = true) {
+export function renderable(part: PartType, showReasoningSummaries = true) {
   if (part.type === "tool") {
     if (HIDDEN_TOOLS.has(part.tool)) return false
     if (part.tool === "question") return part.state.status !== "pending" && part.state.status !== "running"
@@ -581,7 +632,7 @@ function toolDefaultOpen(tool: string, shell = false, edit = false) {
   if (tool === "edit" || tool === "write" || tool === "apply_patch") return edit
 }
 
-function partDefaultOpen(part: PartType, shell = false, edit = false) {
+export function partDefaultOpen(part: PartType, shell = false, edit = false) {
   if (part.type !== "tool") return
   return toolDefaultOpen(part.tool, shell, edit)
 }
@@ -693,7 +744,11 @@ function isContextGroupTool(part: PartType): part is ToolPart {
 }
 
 function contextToolDetail(part: ToolPart): string | undefined {
-  const info = getToolInfo(part.tool, part.state.input ?? {})
+  const info = getToolInfo(
+    part.tool,
+    part.state.input ?? {},
+    "metadata" in part.state ? part.state.metadata : undefined,
+  )
   if (info.subtitle) return info.subtitle
   if (part.state.status === "error") return part.state.error
   if ((part.state.status === "running" || part.state.status === "completed") && part.state.title)
@@ -745,7 +800,7 @@ function contextToolTrigger(part: ToolPart, i18n: ReturnType<typeof useI18n>) {
       }
     }
     default: {
-      const info = getToolInfo(part.tool, input)
+      const info = getToolInfo(part.tool, input, "metadata" in part.state ? part.state.metadata : undefined)
       return {
         title: info.title,
         subtitle: info.subtitle || contextToolDetail(part),
@@ -895,7 +950,7 @@ export function AssistantMessageDisplay(props: {
   )
 }
 
-function ContextToolGroup(props: { parts: ToolPart[]; busy?: boolean }) {
+export function ContextToolGroup(props: { parts: ToolPart[]; busy?: boolean; onSizeChange?: () => void }) {
   const i18n = useI18n()
   const [open, setOpen] = createSignal(false)
   const pending = createMemo(
@@ -903,9 +958,19 @@ function ContextToolGroup(props: { parts: ToolPart[]; busy?: boolean }) {
       !!props.busy || props.parts.some((part) => part.state.status === "pending" || part.state.status === "running"),
   )
   const summary = createMemo(() => contextToolSummary(props.parts))
+  const handleOpenChange = (value: boolean) => {
+    setOpen(value)
+    props.onSizeChange?.()
+  }
 
   return (
-    <Collapsible open={open()} onOpenChange={setOpen} variant="ghost" class="tool-collapsible">
+    <Collapsible
+      open={open()}
+      onOpenChange={handleOpenChange}
+      variant="ghost"
+      class="tool-collapsible"
+      data-timeline-part-ids={props.parts.map((part) => part.id).join(",")}
+    >
       <Collapsible.Trigger>
         <div data-component="context-tool-group-trigger">
           <span
@@ -1027,7 +1092,7 @@ export function UserMessageDisplay(props: {
     const providerID = props.message.model?.providerID
     const modelID = props.message.model?.modelID
     if (!providerID || !modelID) return ""
-    const match = data.store.provider?.all?.find((p) => p.id === providerID)
+    const match = data.store.provider?.all?.get(providerID)
     return match?.models?.[modelID]?.name ?? modelID
   })
   const timefmt = createMemo(() => new Intl.DateTimeFormat(i18n.locale(), { timeStyle: "short" }))
@@ -1053,9 +1118,10 @@ export function UserMessageDisplay(props: {
   const handleCopy = async () => {
     const content = text()
     if (!content) return
-    await navigator.clipboard.writeText(content)
-    setState("copied", true)
-    setTimeout(() => setState("copied", false), 2000)
+    if (await writeClipboard(content)) {
+      setState("copied", true)
+      setTimeout(() => setState("copied", false), 2000)
+    }
   }
 
   const revert = () => {
@@ -1073,7 +1139,7 @@ export function UserMessageDisplay(props: {
   }
 
   return (
-    <div data-component="user-message">
+    <div data-component="user-message" data-timeline-part-id={textPart()?.id}>
       <Show when={attachments().length > 0}>
         <div data-slot="user-message-attachments">
           <For each={attachments()}>
@@ -1112,8 +1178,7 @@ export function UserMessageDisplay(props: {
       <Show when={text()}>
         <>
           <div data-slot="user-message-body">
-            <div data-slot="user-message-text" data-queued={props.queued ? "" : undefined}>
-              {/* kilocode_change */}
+            <div data-slot="user-message-text" dir="auto" data-queued={props.queued ? "" : undefined}>{/* kilocode_change */}
               <HighlightedText text={text()} references={inlineFiles()} agents={agents()} />
             </div>
             {/* kilocode_change start */}
@@ -1233,6 +1298,11 @@ export function Part(props: MessagePartProps) {
         message={props.message}
         hideDetails={props.hideDetails}
         defaultOpen={props.defaultOpen}
+        toolOpen={props.toolOpen}
+        onToolOpenChange={props.onToolOpenChange}
+        deferToolContent={props.deferToolContent}
+        virtualizeDiff={props.virtualizeDiff}
+        onContentRendered={props.onContentRendered}
         showAssistantCopyPartID={props.showAssistantCopyPartID}
         turnDurationMs={props.turnDurationMs}
       />
@@ -1244,10 +1314,16 @@ export interface ToolProps {
   input: Record<string, any>
   metadata: Record<string, any>
   tool: string
+  sessionID?: string
   output?: string
   status?: string
   hideDetails?: boolean
   defaultOpen?: boolean
+  open?: boolean
+  onOpenChange?: (open: boolean) => void
+  deferContent?: boolean
+  virtualizeDiff?: boolean
+  onContentRendered?: () => void
   forceOpen?: boolean
   locked?: boolean
 }
@@ -1345,10 +1421,12 @@ PART_MAPPING["tool"] = function ToolPartDisplay(props) {
   })
 
   const render = createMemo(() => ToolRegistry.render(part().tool) ?? GenericTool)
+  const controlledOpen = () => (props.onToolOpenChange ? (props.toolOpen ?? props.defaultOpen) : undefined)
+  const handleToolOpenChange = (open: boolean) => props.onToolOpenChange?.(open)
 
   return (
     <Show when={!hideQuestion()}>
-      <div data-component="tool-part-wrapper">
+      <div data-component="tool-part-wrapper" data-timeline-part-id={part().id}>
         <Switch>
           <Match when={part().state.status === "error" && (part().state as any).error}>
             {(error) => {
@@ -1366,7 +1444,10 @@ PART_MAPPING["tool"] = function ToolPartDisplay(props) {
                 <ToolErrorCard
                   tool={part().tool}
                   error={error()}
+                  title={part().tool === "websearch" ? webSearchProviderLabel(partMetadata().provider) : undefined}
                   defaultOpen={props.defaultOpen}
+                  open={controlledOpen()}
+                  onOpenChange={props.onToolOpenChange ? handleToolOpenChange : undefined}
                   subtitle={taskSubtitle()}
                   href={taskHref()}
                 />
@@ -1378,12 +1459,18 @@ PART_MAPPING["tool"] = function ToolPartDisplay(props) {
               component={render()}
               input={input()}
               tool={part().tool}
+              sessionID={part().sessionID}
               metadata={partMetadata()}
               // @ts-expect-error
               output={part().state.output}
               status={part().state.status}
               hideDetails={props.hideDetails}
               defaultOpen={props.defaultOpen}
+              open={controlledOpen()}
+              onOpenChange={props.onToolOpenChange ? handleToolOpenChange : undefined}
+              deferContent={props.deferToolContent}
+              virtualizeDiff={props.virtualizeDiff}
+              onContentRendered={props.onContentRendered}
             />
           </Match>
         </Switch>
@@ -1424,7 +1511,7 @@ PART_MAPPING["text"] = function TextPartDisplay(props) {
   const model = createMemo(() => {
     if (props.message.role !== "assistant") return ""
     const message = props.message as AssistantMessage
-    const match = data.store.provider?.all?.find((p) => p.id === message.providerID)
+    const match = data.store.provider?.all?.get(message.providerID)
     return match?.models?.[message.modelID]?.name ?? message.modelID
   })
 
@@ -1464,7 +1551,7 @@ PART_MAPPING["text"] = function TextPartDisplay(props) {
   const streaming = createMemo(
     () => props.message.role === "assistant" && typeof (props.message as AssistantMessage).time.completed !== "number",
   )
-  const text = () => (part().text ?? "").trim()
+  const text = () => readPartText(data.store.part_text_accum_delta, part())
   // kilocode_change start
   // Synthetic text parts (e.g. "Initializing snapshot…" from the slow-repo guard)
   // are transient status indicators, not assistant output — they must never
@@ -1496,14 +1583,15 @@ PART_MAPPING["text"] = function TextPartDisplay(props) {
   const handleCopy = async () => {
     const content = text()
     if (!content) return
-    await navigator.clipboard.writeText(content)
-    setCopied(true)
-    setTimeout(() => setCopied(false), 2000)
+    if (await writeClipboard(content)) {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    }
   }
 
   return (
     <Show when={text() && showSyntheticPart() /* kilocode_change */}>
-      <div data-component="text-part">
+      <div data-component="text-part" data-timeline-part-id={part().id}>
         <div data-slot="text-part-body">
           <Show when={streaming()} fallback={<Markdown text={text()} cacheKey={part().id} streaming={false} />}>
             <PacedMarkdown text={text()} cacheKey={part().id} streaming={streaming()} />
@@ -1538,15 +1626,16 @@ PART_MAPPING["text"] = function TextPartDisplay(props) {
 }
 
 PART_MAPPING["reasoning"] = function ReasoningPartDisplay(props) {
+  const data = useData()
   const part = () => props.part as ReasoningPart
   const streaming = createMemo(
     () => props.message.role === "assistant" && typeof (props.message as AssistantMessage).time.completed !== "number",
   )
-  const text = () => part().text.trim()
+  const text = () => readPartText(data.store.part_text_accum_delta, part())
 
   return (
     <Show when={text()}>
-      <div data-component="reasoning-part">
+      <div data-component="reasoning-part" data-timeline-part-id={part().id}>
         <Show when={streaming()} fallback={<Markdown text={text()} cacheKey={part().id} streaming={false} />}>
           <PacedMarkdown text={text()} cacheKey={part().id} streaming={streaming()} />
         </Show>
@@ -1718,19 +1807,19 @@ ToolRegistry.register({
 ToolRegistry.register({
   name: "websearch",
   render(props) {
-    const i18n = useI18n()
     const query = createMemo(() => {
       const value = props.input.query
       if (typeof value !== "string") return ""
       return value
     })
+    const title = createMemo(() => webSearchProviderLabel(props.metadata.provider))
 
     return (
       <BasicTool
         {...props}
         icon="window-cursor"
         trigger={{
-          title: i18n.t("ui.tool.websearch"),
+          title: title(),
           subtitle: query(),
           subtitleClass: "exa-tool-query",
         }}
@@ -1756,9 +1845,13 @@ ToolRegistry.register({
     const title = createMemo(() => agent().name ?? i18n.t("ui.tool.agent.default"))
     const tone = createMemo(() => agent().color)
     const subtitle = createMemo(() => {
-      const value = props.input.description
-      if (typeof value === "string" && value) return value
-      return childSessionId()
+      const value =
+        typeof props.input.description === "string" && props.input.description
+          ? props.input.description
+          : childSessionId()
+      if (!value) return value
+      if (props.metadata.background === true) return `${value} (background)`
+      return value
     })
     const running = createMemo(() => props.status === "pending" || props.status === "running")
 
@@ -1830,7 +1923,7 @@ ToolRegistry.register({
     const sawPending = pending()
     const text = createMemo(() => {
       const cmd = props.input.command ?? props.metadata.command ?? ""
-      const out = stripAnsi(props.output || props.metadata.output || "")
+      const out = stripAnsi(props.output || props.metadata.output || "").replace(/\r\n?/g, "\n")
       return `$ ${cmd}${out ? "\n\n" + out : ""}`
     })
     const [copied, setCopied] = createSignal(false)
@@ -1838,9 +1931,10 @@ ToolRegistry.register({
     const handleCopy = async () => {
       const content = text()
       if (!content) return
-      await navigator.clipboard.writeText(content)
-      setCopied(true)
-      setTimeout(() => setCopied(false), 2000)
+      if (await writeClipboard(content)) {
+        setCopied(true)
+        setTimeout(() => setCopied(false), 2000)
+      }
     }
 
     return (
@@ -1898,12 +1992,51 @@ ToolRegistry.register({
     const path = createMemo(() => props.metadata?.filediff?.file || props.input.filePath || "")
     const filename = () => getFilename(props.input.filePath ?? "")
     const pending = () => props.status === "pending" || props.status === "running"
+    const diffSource = createMemo(
+      () => {
+        const filediff = props.metadata?.filediff
+        if (!filediff) return
+        return {
+          file: filediff.file || props.input.filePath || "",
+          patch: typeof filediff.patch === "string" ? filediff.patch : undefined,
+          before: typeof filediff.before === "string" ? filediff.before : undefined,
+          after: typeof filediff.after === "string" ? filediff.after : undefined,
+        }
+      },
+      undefined,
+      {
+        equals: (a, b) =>
+          a?.file === b?.file && a?.patch === b?.patch && a?.before === b?.before && a?.after === b?.after,
+      },
+    )
+
+    const fileCompProps = createMemo(() => {
+      try {
+        const source = diffSource()
+        if (source) {
+          const fileDiff = resolveFileDiff(source)
+          if (fileDiff) return { fileDiff, hunkSeparators: fileDiff.isPartial ? "simple" : "line-info-basic" }
+        }
+      } catch {}
+
+      return {
+        before: {
+          name: props.metadata?.filediff?.file || props.input.filePath,
+          contents: props.metadata?.filediff?.before || props.input.oldString || "",
+        },
+        after: {
+          name: props.metadata?.filediff?.file || props.input.filePath,
+          contents: props.metadata?.filediff?.after || props.input.newString || "",
+        },
+      }
+    })
+
     return (
       <div data-component="edit-tool">
         <BasicTool
           {...props}
           icon="code-lines"
-          defer
+          defer={props.deferContent !== false}
           trigger={
             <div data-component="edit-trigger">
               <div data-slot="message-part-title-area">
@@ -1942,14 +2075,9 @@ ToolRegistry.register({
                 <Dynamic
                   component={fileComponent}
                   mode="diff"
-                  before={{
-                    name: props.metadata?.filediff?.file || props.input.filePath,
-                    contents: props.metadata?.filediff?.before || props.input.oldString || "",
-                  }}
-                  after={{
-                    name: props.metadata?.filediff?.file || props.input.filePath,
-                    contents: props.metadata?.filediff?.after || props.input.newString || "",
-                  }}
+                  virtualize={props.virtualizeDiff}
+                  onRendered={props.onContentRendered}
+                  {...fileCompProps()}
                 />
               </div>
             </ToolFileAccordion>
@@ -1975,7 +2103,7 @@ ToolRegistry.register({
         <BasicTool
           {...props}
           icon="code-lines"
-          defer
+          defer={props.deferContent !== false}
           trigger={
             <div data-component="write-trigger">
               <div data-slot="message-part-title-area">
@@ -2009,6 +2137,7 @@ ToolRegistry.register({
                     cacheKey: checksum(props.input.content),
                   }}
                   overflow="scroll"
+                  onRendered={props.onContentRendered}
                 />
               </div>
             </ToolFileAccordion>
@@ -2057,7 +2186,7 @@ ToolRegistry.register({
             <BasicTool
               {...props}
               icon="code-lines"
-              defer
+              defer={props.deferContent !== false}
               trigger={{
                 title: i18n.t("ui.tool.patch"),
                 subtitle: subtitle(),
@@ -2129,9 +2258,16 @@ ToolRegistry.register({
                             </Accordion.Trigger>
                           </StickyAccordionHeader>
                           <Accordion.Content>
-                            <Show when={visible()}>
+                            <Show when={props.deferContent === false || visible()}>
                               <div data-component="apply-patch-file-diff">
-                                <Dynamic component={fileComponent} mode="diff" fileDiff={file.view.fileDiff} />
+                                <Dynamic
+                                  component={fileComponent}
+                                  mode="diff"
+                                  virtualize={props.virtualizeDiff}
+                                  fileDiff={file.view.fileDiff}
+                                  hunkSeparators={file.view.fileDiff.isPartial ? "simple" : "line-info-basic"}
+                                  onRendered={props.onContentRendered}
+                                />
                               </div>
                             </Show>
                           </Accordion.Content>
@@ -2149,7 +2285,7 @@ ToolRegistry.register({
           <BasicTool
             {...props}
             icon="code-lines"
-            defer
+            defer={props.deferContent !== false}
             trigger={
               <div data-component="edit-trigger">
                 <div data-slot="message-part-title-area">
@@ -2201,7 +2337,13 @@ ToolRegistry.register({
               }
             >
               <div data-component="apply-patch-file-diff">
-                <Dynamic component={fileComponent} mode="diff" fileDiff={single()!.view.fileDiff} />
+                <Dynamic
+                  component={fileComponent}
+                  mode="diff"
+                  virtualize={props.virtualizeDiff}
+                  fileDiff={single()!.view.fileDiff}
+                  onRendered={props.onContentRendered}
+                />
               </div>
             </ToolFileAccordion>
           </BasicTool>

@@ -1,28 +1,31 @@
 // kilocode_change - new file
+import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { describe, expect } from "bun:test"
 import path from "path"
 import { Effect, FileSystem, Layer } from "effect"
 import { FetchHttpClient } from "effect/unstable/http"
 import { NodeFileSystem } from "@effect/platform-node"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
-import { AppFileSystem } from "@opencode-ai/core/filesystem"
+import { FSUtil } from "@opencode-ai/core/fs-util"
+import { RuntimeFlags } from "../../src/effect/runtime-flags"
 import { Instruction } from "../../src/session/instruction"
 import { Global } from "@opencode-ai/core/global"
 import { TestConfig } from "../fixture/config"
-import { provideInstance, tmpdirScoped } from "../fixture/fixture"
+import { provideInstance, testInstanceStoreLayer, tmpdirScoped } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
+import { Config } from "../../src/config/config"
 
-const it = testEffect(Layer.mergeAll(CrossSpawnSpawner.defaultLayer, NodeFileSystem.layer))
+const it = testEffect(
+  Layer.mergeAll(AppNodeBuilder.build(CrossSpawnSpawner.node), NodeFileSystem.layer, RuntimeFlags.layer(), testInstanceStoreLayer),
+)
 
 const configLayer = TestConfig.layer()
 
 const instructionLayer = (global: Partial<Global.Interface>) =>
-  Instruction.layer.pipe(
-    Layer.provide(configLayer),
-    Layer.provide(AppFileSystem.defaultLayer),
-    Layer.provide(FetchHttpClient.layer),
-    Layer.provide(Global.layerWith(global)),
-  )
+  AppNodeBuilder.build(Instruction.node, [
+    [Config.node, configLayer],
+    [Global.node, Global.layerWith(global)],
+  ])
 
 const provideInstruction =
   (global: Partial<Global.Interface>) =>

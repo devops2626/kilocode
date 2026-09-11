@@ -9,7 +9,6 @@ type VSCode = {
 }
 
 type Server = {
-  profileData: Accessor<unknown | null>
   goToLogin: () => void
 }
 
@@ -17,7 +16,7 @@ type Lang = {
   t: (key: string) => string
 }
 
-export type SpeechState = "idle" | "recording" | "transcribing" | "error"
+export type SpeechState = "idle" | "starting" | "recording" | "transcribing" | "error"
 
 export type InsertTranscript = (text: string) => void
 
@@ -44,7 +43,7 @@ export type SpeechToText = {
 export function useSpeechToText(vscode: VSCode, server: Server, lang: Lang): SpeechToText {
   const [state, setState] = createSignal<SpeechState>("idle")
   const [error, setError] = createSignal<string | undefined>()
-  const active = () => state() === "recording" || state() === "transcribing"
+  const active = () => state() === "starting" || state() === "recording" || state() === "transcribing"
   const prefix = globalThis.crypto?.randomUUID?.() ?? `stt-${Math.random().toString(36).slice(2)}`
 
   let request = ""
@@ -52,13 +51,16 @@ export function useSpeechToText(vscode: VSCode, server: Server, lang: Lang): Spe
   let insert: InsertTranscript | undefined
   let done: (() => void) | undefined
   let ready: (() => boolean) | undefined
+  let pending = false
 
   const unsub = vscode.onMessage((msg) => {
     if (!isSpeechMessage(msg)) return
     if (msg.requestId !== request) return
 
     if (msg.type === "speechToTextStarted") {
+      if (state() !== "starting") return
       setState("recording")
+      if (pending) transcribe()
       return
     }
 
@@ -70,6 +72,10 @@ export function useSpeechToText(vscode: VSCode, server: Server, lang: Lang): Spe
     }
 
     if (msg.type === "speechToTextError") {
+      if (msg.code === "not_authenticated") {
+        login()
+        return
+      }
       fail(msg.error)
       return
     }
@@ -98,22 +104,9 @@ export function useSpeechToText(vscode: VSCode, server: Server, lang: Lang): Spe
     insert = opts.insert
     setError(undefined)
 
-    if (!server.profileData()) {
-      showToast({
-        variant: "error",
-        title: lang.t("speechToText.error.loginRequired"),
-        actions: [
-          { label: lang.t("common.signIn"), onClick: server.goToLogin },
-          { label: lang.t("common.dismiss"), onClick: "dismiss" },
-        ],
-      })
-      fail(lang.t("speechToText.error.loginRequired"), false)
-      return
-    }
-
     counter++
     request = `${prefix}-${counter}`
-    setState("recording")
+    setState("starting")
     vscode.postMessage({
       type: "speechToTextStart",
       requestId: request,
@@ -123,9 +116,18 @@ export function useSpeechToText(vscode: VSCode, server: Server, lang: Lang): Spe
   }
 
   function stop(opts?: StopOptions) {
-    if (state() !== "recording") return
+    if (state() !== "starting" && state() !== "recording") return
     done = opts?.done
     ready = opts?.ready
+    if (state() === "starting") {
+      pending = true
+      return
+    }
+    transcribe()
+  }
+
+  function transcribe() {
+    pending = false
     setState("transcribing")
     vscode.postMessage({ type: "speechToTextStop", requestId: request })
   }
@@ -144,6 +146,19 @@ export function useSpeechToText(vscode: VSCode, server: Server, lang: Lang): Spe
     setError(undefined)
   }
 
+  function login() {
+    const message = lang.t("speechToText.error.loginRequired")
+    showToast({
+      variant: "error",
+      title: message,
+      actions: [
+        { label: lang.t("common.signIn"), onClick: server.goToLogin },
+        { label: lang.t("common.dismiss"), onClick: "dismiss" },
+      ],
+    })
+    fail(message, false)
+  }
+
   function fail(message: string, toast = true) {
     cleanup()
     setState("error")
@@ -156,6 +171,7 @@ export function useSpeechToText(vscode: VSCode, server: Server, lang: Lang): Spe
     insert = undefined
     done = undefined
     ready = undefined
+    pending = false
   }
 
   return { state, error, active, start, stop, cancel, clear }

@@ -1,5 +1,6 @@
 package ai.kilocode.client.session.controller
 
+import ai.kilocode.client.util.edtWait
 import ai.kilocode.client.app.KiloAppService
 import ai.kilocode.client.app.KiloSessionService
 import ai.kilocode.client.session.model.SessionModel
@@ -8,13 +9,18 @@ import ai.kilocode.client.session.model.SessionState
 import ai.kilocode.client.testing.FakeAppRpcApi
 import ai.kilocode.client.testing.FakeWorkspaceRpcApi
 import ai.kilocode.client.testing.FakeSessionRpcApi
+import ai.kilocode.client.testing.TestCoroutines
+import ai.kilocode.client.testing.TestUiTimers
 import ai.kilocode.client.app.KiloWorkspaceService
 import ai.kilocode.client.app.Workspace
+import ai.kilocode.client.plugin.KiloPluginSettings
 import ai.kilocode.client.session.SessionRef
+import ai.kilocode.log.KiloLog
 import ai.kilocode.rpc.dto.AgentDto
 import ai.kilocode.rpc.dto.AgentsDto
 import ai.kilocode.rpc.dto.ChatEventDto
 import ai.kilocode.rpc.dto.ConfigDto
+import ai.kilocode.rpc.dto.ConfigWarningDto
 import ai.kilocode.rpc.dto.KiloAppStateDto
 import ai.kilocode.rpc.dto.KiloAppStatusDto
 import ai.kilocode.rpc.dto.KiloWorkspaceStateDto
@@ -25,17 +31,19 @@ import ai.kilocode.rpc.dto.ModelDto
 import ai.kilocode.rpc.dto.PartDto
 import ai.kilocode.rpc.dto.ProviderDto
 import ai.kilocode.rpc.dto.ProvidersDto
+import ai.kilocode.rpc.dto.SessionChangeDto
+import ai.kilocode.rpc.dto.SessionChangeKindDto
 import ai.kilocode.rpc.dto.SessionDto
 import ai.kilocode.rpc.dto.SessionTimeDto
+import ai.kilocode.rpc.dto.TelemetryCaptureDto
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.util.Disposer
 import com.intellij.testFramework.fixtures.BasePlatformTestCase
-import com.intellij.util.ui.UIUtil
+import ai.kilocode.client.testing.TEST_WAIT_MS
+import ai.kilocode.client.testing.pumpEdt
 import java.awt.event.HierarchyEvent
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 
@@ -94,17 +102,28 @@ abstract class SessionControllerTestBase : BasePlatformTestCase() {
     protected lateinit var app: KiloAppService
     protected lateinit var workspaces: KiloWorkspaceService
     protected lateinit var workspace: Workspace
+    protected lateinit var timers: TestUiTimers
 
+    private lateinit var coroutines: TestCoroutines
     protected lateinit var scope: CoroutineScope
     protected lateinit var parent: Disposable
+
+    /** Balloons a controller raised, instead of real IDE notifications. */
+    protected val notifications = mutableListOf<Pair<String, String>>()
 
     override fun setUp() {
         super.setUp()
         rpc = FakeSessionRpcApi()
         appRpc = FakeAppRpcApi()
         projectRpc = FakeWorkspaceRpcApi()
+        timers = TestUiTimers()
+        notifications.clear()
+        // Application-level and shared across tests in a fixture, and it now seeds a new session's
+        // mode, so a leftover pick from another test would decide this one's starting agent.
+        KiloPluginSettings.unsetAgent()
 
-        scope = CoroutineScope(SupervisorJob())
+        coroutines = TestCoroutines()
+        scope = coroutines.scope
         parent = Disposer.newDisposable("test")
 
         sessions = KiloSessionService(project, scope, rpc)
@@ -116,7 +135,8 @@ abstract class SessionControllerTestBase : BasePlatformTestCase() {
     override fun tearDown() {
         try {
             Disposer.dispose(parent)
-            scope.cancel()
+            coroutines.close()
+            KiloPluginSettings.unsetAgent()
         } finally {
             super.tearDown()
         }
@@ -128,17 +148,20 @@ abstract class SessionControllerTestBase : BasePlatformTestCase() {
         id: String? = null,
         flushMs: Long = Long.MAX_VALUE,
         displayMs: Long = Long.MAX_VALUE,
+        revertTimeoutMs: Long = SessionController.REVERT_TIMEOUT_MS,
         open: (SessionRef) -> Unit = {},
+        log: KiloLog? = null,
     ): SessionController {
-        return controller(id, flushMs, true, displayMs = displayMs, open = open)
+        return controller(id, flushMs, true, displayMs = displayMs, revertTimeoutMs = revertTimeoutMs, open = open, log = log)
     }
 
     protected fun controller(
         ref: SessionRef,
         flushMs: Long = Long.MAX_VALUE,
         displayMs: Long = Long.MAX_VALUE,
+        revertTimeoutMs: Long = SessionController.REVERT_TIMEOUT_MS,
     ): SessionController {
-        return controller(ref = ref, flushMs = flushMs, condense = true, displayMs = displayMs)
+        return controller(ref = ref, flushMs = flushMs, condense = true, displayMs = displayMs, revertTimeoutMs = revertTimeoutMs)
     }
 
     protected fun controller(
@@ -146,27 +169,34 @@ abstract class SessionControllerTestBase : BasePlatformTestCase() {
         flushMs: Long,
         condense: Boolean,
         displayMs: Long = Long.MAX_VALUE,
+        revertTimeoutMs: Long = SessionController.REVERT_TIMEOUT_MS,
         session: SessionDto? = null,
         beforeUpdate: () -> Boolean = { false },
         afterUpdate: (Boolean) -> Unit = {},
         open: (SessionRef) -> Unit = {},
+        log: KiloLog? = null,
         ref: SessionRef? = if (session != null) SessionRef.Local(session) else SessionRef.from(id),
     ): SessionController {
         val root = Root()
         val m = SessionController(
-            parent,
-            ref,
-            sessions,
-            workspace,
-            app,
-            scope,
-            root,
-            flushMs,
-            condense,
-            displayMs,
+            parent = parent,
+            ref = ref,
+            sessions = sessions,
+            workspace = workspace,
+            app = app,
+            cs = scope,
+            comp = root,
+            flushMs = flushMs,
+            condense = condense,
+            displayMs = displayMs,
+            revertTimeoutMs = revertTimeoutMs,
             open = open,
             beforeUpdate = beforeUpdate,
             afterUpdate = afterUpdate,
+            telemetry = { event, props -> appRpc.telemetry.add(TelemetryCaptureDto(event, props)) },
+            notify = { title, body -> notifications.add(title to body) },
+            timers = timers,
+            log = log ?: KiloLog.create(SessionController::class.java),
         )
         controllers.add(m)
         roots[m] = root
@@ -220,49 +250,58 @@ abstract class SessionControllerTestBase : BasePlatformTestCase() {
 
     // ------ EDT + coroutine helpers ------
 
-    /** Let coroutines settle without forcing buffered controller delivery. */
-    protected fun settle() = runBlocking {
-        repeat(5) {
-            delay(100)
-            edt { UIUtil.dispatchAllInvocationEvents() }
-        }
+    /** Drain background coroutine and EDT work without forcing buffered controller delivery. */
+    protected fun settle() {
+        drain(false)
     }
 
-    /** Let coroutines settle, force buffered controller delivery, then drain EDT. */
-    protected fun flush() = runBlocking {
-        repeat(5) {
-            delay(100)
-            edt {
-                controllers.forEach { it.flushEvents() }
-                UIUtil.dispatchAllInvocationEvents()
-            }
-        }
+    /** Drain background work, force buffered controller delivery, then drain EDT. */
+    protected fun flush() {
+        drain(true)
     }
 
     protected fun pause(ms: Long) = runBlocking {
-        val tick = 10L
-        repeat((ms / tick).coerceAtLeast(1).toInt()) {
-            delay(tick)
-            edt { UIUtil.dispatchAllInvocationEvents() }
+        settleFast()
+        timers.advanceBy(ms)
+        settleFast()
+    }
+
+    private suspend fun settleFast() {
+        repeat(3) {
+            delay(1)
+            pumpEdt()
         }
     }
 
-    protected fun edt(block: () -> Unit) {
-        ApplicationManager.getApplication().invokeAndWait(block)
+    private fun drain(force: Boolean) {
+        coroutines.drain {
+            if (force) edt { controllers.forEach { it.flushEvents() } }
+            pumpEdt()
+        }
     }
 
-    protected fun <T> edt(block: () -> T): T {
-        var result: T? = null
-        ApplicationManager.getApplication().invokeAndWait { result = block() }
-        @Suppress("UNCHECKED_CAST")
-        return result as T
-    }
+    protected fun edt(block: () -> Unit) = edtWait(block)
+
+    protected fun <T> edt(block: () -> T): T = edtWait(block)
 
     /** Emit a chat event into the fake RPC flow. */
     protected fun emit(event: ChatEventDto, flush: Boolean = true) {
         runBlocking { rpc.events.emit(event) }
         if (flush) flush()
     }
+
+    /** Emit a session lifecycle change into the fake RPC flow. */
+    protected fun change(id: String, directory: String, kind: SessionChangeKindDto) {
+        runBlocking { rpc.changes.emit(SessionChangeDto(id, directory, kind)) }
+    }
+
+    /**
+     * Drain background work and the EDT until [cond] holds, returning whether it did. Use for state
+     * that arrives from a flow rather than from a call the test just made, where [flush] alone
+     * cannot know how many hops are still pending.
+     */
+    protected fun waitFor(deadlineMs: Long = TEST_WAIT_MS, cond: () -> Boolean): Boolean =
+        coroutines.pumpUntil(deadlineMs, { edt { controllers.forEach { it.flushEvents() } }; pumpEdt() }, cond)
 
     /** Create a controller, attach both listeners, send initial prompt, and flush. */
     protected fun prompted(): Triple<SessionController, MutableList<SessionControllerEvent>, MutableList<SessionModelEvent>> {
@@ -374,9 +413,11 @@ abstract class SessionControllerTestBase : BasePlatformTestCase() {
         ),
         connected: List<String> = listOf("kilo"),
         defaults: Map<String, String> = emptyMap(),
+        warnings: List<ConfigWarningDto> = emptyList(),
     ) = KiloWorkspaceStateDto(
         status = KiloWorkspaceStatusDto.READY,
         agents = AgentsDto(agents = agents, all = agents, default = default),
         providers = ProvidersDto(providers = providers, connected = connected, defaults = defaults),
+        warnings = warnings,
     )
 }

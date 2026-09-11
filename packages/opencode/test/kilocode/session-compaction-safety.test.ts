@@ -4,11 +4,19 @@
 
 import { describe, expect, test } from "bun:test"
 import { KiloSessionPrompt } from "../../src/kilocode/session/prompt"
+import { KiloSessionMessageOrder } from "../../src/kilocode/session/message-order"
 import { MessageV2 } from "../../src/session/message-v2"
-import { ModelID, ProviderID } from "../../src/provider/schema"
+import { ProviderV2 } from "@opencode-ai/core/provider"
+import { ModelV2 } from "@opencode-ai/core/model"
 import { MessageID, PartID, SessionID } from "../../src/session/schema"
+import type { Provider } from "../../src/provider/provider"
 
 const sessionID = SessionID.make("ses_safety")
+const model = {
+  id: ModelV2.ID.make("test"),
+  providerID: ProviderV2.ID.make("test"),
+  api: { id: "test", npm: "@ai-sdk/openai" },
+} as Provider.Model
 
 function userInfo(id: string): MessageV2.User {
   return {
@@ -17,7 +25,7 @@ function userInfo(id: string): MessageV2.User {
     role: "user",
     time: { created: 0 },
     agent: "test",
-    model: { providerID: ProviderID.make("test"), modelID: ModelID.make("test") },
+    model: { providerID: ProviderV2.ID.make("test"), modelID: ModelV2.ID.make("test") },
     tools: {},
     mode: "",
   } as unknown as MessageV2.User
@@ -34,8 +42,8 @@ function assistantInfo(
     role: "assistant",
     time: { created: 0 },
     parentID: MessageID.make(parentID),
-    modelID: ModelID.make("test"),
-    providerID: ProviderID.make("test"),
+    modelID: ModelV2.ID.make("test"),
+    providerID: ProviderV2.ID.make("test"),
     mode: "",
     agent: "test",
     path: { cwd: "/", root: "/" },
@@ -47,7 +55,7 @@ function assistantInfo(
   } as unknown as MessageV2.Assistant
 }
 
-function textPart(messageID: string, text: string, partID = "p_" + messageID): MessageV2.TextPart {
+function textPart(messageID: string, text: string, partID = "prt_" + messageID): MessageV2.TextPart {
   return {
     id: PartID.make(partID),
     sessionID,
@@ -57,7 +65,7 @@ function textPart(messageID: string, text: string, partID = "p_" + messageID): M
   }
 }
 
-function syntheticTextPart(messageID: string, text: string, partID = "p_syn_" + messageID): MessageV2.TextPart {
+function syntheticTextPart(messageID: string, text: string, partID = "prt_syn_" + messageID): MessageV2.TextPart {
   return {
     id: PartID.make(partID),
     sessionID,
@@ -68,11 +76,34 @@ function syntheticTextPart(messageID: string, text: string, partID = "p_syn_" + 
   }
 }
 
+function compactionPart(messageID: string, tailStartID: string): MessageV2.CompactionPart {
+  return {
+    id: PartID.make("prt_compact_" + messageID),
+    sessionID,
+    messageID: MessageID.make(messageID),
+    type: "compaction",
+    auto: false,
+    tail_start_id: MessageID.make(tailStartID),
+  }
+}
+
+function subtaskPart(messageID: string): MessageV2.SubtaskPart {
+  return {
+    id: PartID.make("prt_subtask_" + messageID),
+    sessionID,
+    messageID: MessageID.make(messageID),
+    type: "subtask",
+    prompt: "continue",
+    description: "Continue queued task",
+    agent: "test",
+  }
+}
+
 function filePart(
   messageID: string,
   mime: string,
   filename: string | undefined,
-  partID = "p_file_" + messageID,
+  partID = "prt_file_" + messageID,
 ): MessageV2.FilePart {
   return {
     id: PartID.make(partID),
@@ -89,7 +120,7 @@ function toolPart(
   messageID: string,
   status: "completed" | "error" | "pending" | "running",
   attachments?: MessageV2.FilePart[],
-  partID = "p_tool_" + messageID,
+  partID = "prt_tool_" + messageID,
 ): MessageV2.ToolPart {
   const state = (() => {
     if (status === "completed") {
@@ -149,6 +180,11 @@ function assistant(
   return { info: assistantInfo(id, parentID, opts), parts }
 }
 
+function created(msg: MessageV2.WithParts, time: number) {
+  msg.info.time.created = time
+  return msg
+}
+
 const apiError = new MessageV2.APIError({
   message: "boom",
   isRetryable: true,
@@ -175,6 +211,54 @@ describe("KiloSessionPrompt.hasCompletedSummary", () => {
   test("returns true when summary has finish and no error", () => {
     const msgs = [user("msg_u1"), assistant("msg_a1", "msg_u1", [], { summary: true, finish: "end_turn" })]
     expect(KiloSessionPrompt.hasCompletedSummary(msgs)).toBe(true)
+  })
+})
+
+describe("MessageV2.latest", () => {
+  test("selects chronological state after retained pre-compaction tail", () => {
+    const msgs = MessageV2.filterCompacted([
+      created(assistant("msg_summary", "msg_compact", [], { summary: true, finish: "end_turn" }), 4),
+      created(user("msg_compact", [compactionPart("msg_compact", "msg_tail")]), 3),
+      created(assistant("msg_tail_reply", "msg_tail", [], { finish: "end_turn" }), 2),
+      created(user("msg_tail", [textPart("msg_tail", "historical retained prompt")]), 1),
+    ])
+
+    expect(msgs.map((m) => m.info.id)).toEqual([
+      MessageID.make("msg_compact"),
+      MessageID.make("msg_summary"),
+      MessageID.make("msg_tail"),
+      MessageID.make("msg_tail_reply"),
+    ])
+
+    const state = KiloSessionMessageOrder.latest(msgs)
+    expect(state.user?.id).toBe(MessageID.make("msg_compact"))
+    expect(state.assistant?.id).toBe(MessageID.make("msg_summary"))
+    expect(state.finished?.id).toBe(MessageID.make("msg_summary"))
+    expect(state.tasks).toEqual([])
+  })
+
+  test("keeps queued subtasks moved after a chronologically later assistant", () => {
+    const part = subtaskPart("msg_queued")
+    const active = created(user("msg_active"), 1)
+    const queued = created(user("msg_queued", [part]), 2)
+    const done = created(assistant("msg_done", "msg_active", [], { finish: "end_turn" }), 3)
+    KiloSessionMessageOrder.annotate([active, queued, done])
+
+    const state = KiloSessionMessageOrder.latest([active, done, queued])
+    expect(state.user?.id).toBe(MessageID.make("msg_queued"))
+    expect(state.finished?.id).toBe(MessageID.make("msg_done"))
+    expect(state.tasks).toEqual([part])
+  })
+
+  test("processes projected tasks in queue order", () => {
+    const first = subtaskPart("msg_first")
+    const second = subtaskPart("msg_second")
+    const msgs = [created(user("msg_first", [first]), 1), created(user("msg_second", [second]), 2)]
+
+    const state = KiloSessionMessageOrder.latest(msgs)
+    expect(state.user?.id).toBe(MessageID.make("msg_second"))
+    expect(state.tasks).toEqual([second, first])
+    expect(state.tasks.pop()).toBe(first)
   })
 })
 
@@ -226,6 +310,31 @@ describe("KiloSessionPrompt.trimBeforeLastSummary", () => {
       MessageID.make("msg_s3"),
       MessageID.make("msg_u4"),
     ])
+  })
+
+  test("keeps the newest summary when retained history contains an older summary", () => {
+    const filtered = MessageV2.filterCompacted([
+      created(assistant("msg_s8", "msg_c7", [], { summary: true, finish: "end_turn" }), 8),
+      created(user("msg_c7", [compactionPart("msg_c7", "msg_u1")]), 7),
+      created(assistant("msg_a6", "msg_u5", [], { finish: "end_turn" }), 6),
+      created(user("msg_u5"), 5),
+      created(assistant("msg_s4", "msg_c3", [], { summary: true, finish: "end_turn" }), 4),
+      created(user("msg_c3", [compactionPart("msg_c3", "msg_u1")]), 3),
+      created(assistant("msg_a2", "msg_u1", [], { finish: "end_turn" }), 2),
+      created(user("msg_u1"), 1),
+    ])
+
+    expect(filtered.map((m) => m.info.id)).toEqual([
+      MessageID.make("msg_c7"),
+      MessageID.make("msg_s8"),
+      MessageID.make("msg_u1"),
+      MessageID.make("msg_a2"),
+      MessageID.make("msg_c3"),
+      MessageID.make("msg_s4"),
+      MessageID.make("msg_u5"),
+      MessageID.make("msg_a6"),
+    ])
+    expect(KiloSessionPrompt.trimBeforeLastSummary(filtered)).toBe(filtered)
   })
 
   test("ignores errored and unfinished summaries when choosing boundary", () => {
@@ -309,8 +418,8 @@ describe("KiloSessionPrompt.stripHistoricalMedia", () => {
   })
 
   test("does NOT touch text/plain or directory file parts", () => {
-    const textFile = filePart("msg_hist", "text/plain", "notes.txt", "p_txt")
-    const dirFile = filePart("msg_hist", "application/x-directory", "src/", "p_dir")
+    const textFile = filePart("msg_hist", "text/plain", "notes.txt", "prt_txt")
+    const dirFile = filePart("msg_hist", "application/x-directory", "src/", "prt_dir")
     const msgs = [user("msg_hist", [textFile, dirFile]), user("msg_last", [textPart("msg_last", "follow-up")])]
     const result = KiloSessionPrompt.stripHistoricalMedia(msgs)
     expect(result[0].parts[0]).toBe(textFile)
@@ -318,9 +427,9 @@ describe("KiloSessionPrompt.stripHistoricalMedia", () => {
   })
 
   test("filters media attachments out of completed tool parts, keeps non-media", () => {
-    const imageAtt = filePart("msg_tool", "image/png", "shot.png", "p_att_img")
-    const textAtt = filePart("msg_tool", "text/plain", "data.txt", "p_att_txt")
-    const pdfAtt = filePart("msg_tool", "application/pdf", "doc.pdf", "p_att_pdf")
+    const imageAtt = filePart("msg_tool", "image/png", "shot.png", "prt_att_img")
+    const textAtt = filePart("msg_tool", "text/plain", "data.txt", "prt_att_txt")
+    const pdfAtt = filePart("msg_tool", "application/pdf", "doc.pdf", "prt_att_pdf")
     const tool = toolPart("msg_tool", "completed", [imageAtt, textAtt, pdfAtt])
     const msgs = [
       user("msg_u1", [textPart("msg_u1", "question")]),
@@ -424,7 +533,7 @@ describe("KiloSessionPrompt.stripHistoricalMedia", () => {
       user("msg_current", [textPart("msg_current", "check this"), currentImage]),
       user("msg_syn", [
         syntheticTextPart("msg_syn", "Summarize the task tool output above and continue with your task."),
-        syntheticTextPart("msg_syn", "<environment_details>\nCurrent time: now\n</environment_details>", "p_env"),
+        syntheticTextPart("msg_syn", "<environment_details>\nCurrent time: now\n</environment_details>", "prt_env"),
       ]),
     ]
     const result = KiloSessionPrompt.stripHistoricalMedia(msgs)
@@ -477,5 +586,27 @@ describe("KiloSessionPrompt.maybeStripHistoricalMedia", () => {
     expect((histPart as MessageV2.TextPart).text).toBe("[Attached image/png: hist.png]")
     // last user untouched
     expect(result[3].parts[0].type).toBe("text")
+  })
+})
+
+describe("MessageV2 tool output truncation", () => {
+  test("does not split a surrogate pair during compaction", async () => {
+    const part = toolPart("msg_a", "completed")
+    if (part.state.status !== "completed") throw new Error("expected completed tool part")
+    part.state.output = "x".repeat(1999) + "📁" + "tail"
+
+    const result = await MessageV2.toModelMessages(
+      [user("msg_u", [textPart("msg_u", "read")]), assistant("msg_a", "msg_u", [part])],
+      model,
+      { toolOutputMaxChars: 2000 },
+    )
+    const message = result[2]
+    if (message.role !== "tool") throw new Error("expected tool message")
+    const item = message.content[0]
+    if (item.type !== "tool-result" || item.output.type !== "text") throw new Error("expected text tool result")
+
+    const isolated = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/
+    expect(isolated.test(item.output.value)).toBe(false)
+    expect(item.output.value).toContain("omitted 6 chars")
   })
 })

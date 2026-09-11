@@ -1,5 +1,12 @@
 import { describe, it, expect } from "bun:test"
-import { deepMerge, stripNulls, ConfigState } from "../../webview-ui/src/utils/config-utils"
+import {
+  configUnsetPaths,
+  ConfigState,
+  deepMerge,
+  mergeScopedConfig,
+  pruneConfigSet,
+  stripNulls,
+} from "../../webview-ui/src/utils/config-utils"
 import type { Config } from "../../webview-ui/src/types/messages"
 
 // ---------------------------------------------------------------------------
@@ -39,6 +46,38 @@ describe("deepMerge", () => {
     const result = deepMerge(target, source)
     expect(result.agent?.code?.disable).toBe(false)
     expect(result.agent?.code?.hidden).toBe(false)
+  })
+})
+
+describe("scoped config normalization", () => {
+  it("preserves indexing null overrides while stripping unrelated nulls", () => {
+    const target = { username: "alice", indexing: { model: "global", dimension: 1024 } } as Config
+    const source = { username: null, indexing: { model: null, dimension: null } } as unknown as Partial<Config>
+
+    expect(mergeScopedConfig(target, source)).toEqual({ indexing: { model: null, dimension: null } })
+  })
+
+  it("builds clean set and unset payloads while preserving indexing null overrides", () => {
+    const patch = {
+      formatter: {},
+      username: null,
+      indexing: {
+        model: null,
+        dimension: null,
+        searchMinScore: undefined,
+        qdrant: { apiKey: undefined },
+      },
+    }
+
+    expect(pruneConfigSet(patch)).toEqual({
+      formatter: {},
+      indexing: { model: null, dimension: null },
+    })
+    expect(configUnsetPaths(patch)).toEqual([
+      ["username"],
+      ["indexing", "searchMinScore"],
+      ["indexing", "qdrant", "apiKey"],
+    ])
   })
 })
 
@@ -117,6 +156,18 @@ describe("ConfigState", () => {
 
       expect(s.config.agent?.code?.disable).toBe(false)
       expect(s.config.agent?.code?.hidden).toBe(false)
+    })
+
+    it("preserves a shared agent board draft across configLoaded pushes", () => {
+      const s = new ConfigState()
+      s.handleConfigLoaded({ experimental: { shared_agent_board: false } })
+      s.updateConfig({ experimental: { shared_agent_board: true } })
+
+      s.handleConfigLoaded({ experimental: { shared_agent_board: false } })
+
+      expect(s.config.experimental?.shared_agent_board).toBe(true)
+      expect(s.draft.experimental?.shared_agent_board).toBe(true)
+      expect(s.dirty).toBe(true)
     })
 
     it("preserves clearing default_agent when the current default is hidden", () => {
@@ -351,6 +402,27 @@ describe("ConfigState", () => {
         agent: { explore: { variant: null } },
       })
     })
+  })
+
+  it("sets and clears the compaction model without changing other settings", () => {
+    const s = new ConfigState()
+    const cfg: Config = {
+      model: "kilo/openai/gpt-4.1",
+      agent: { compaction: { prompt: "Keep task details" }, code: { model: "kilo/openai/gpt-4.1" } },
+    }
+    const model = "kilo/anthropic/claude-haiku-4-5"
+    s.handleConfigLoaded(cfg)
+    s.updateConfig({ agent: { compaction: { model } } })
+
+    expect(s.config).toEqual({
+      ...cfg,
+      agent: { ...cfg.agent, compaction: { prompt: "Keep task details", model } },
+    })
+    s.updateConfig({ agent: { compaction: { model: null } } })
+
+    expect(s.config).toEqual(cfg)
+    expect(s.draft.agent?.compaction?.model).toBeNull()
+    expect(configUnsetPaths(s.draft)).toEqual([["agent", "compaction", "model"]])
   })
 
   describe("agent permission patches", () => {

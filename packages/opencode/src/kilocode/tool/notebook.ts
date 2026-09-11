@@ -4,7 +4,8 @@ import * as Encoding from "../encoding"
 
 type ObjectValue = Record<string, unknown>
 
-const object = (value: unknown): value is ObjectValue => typeof value === "object" && value !== null && !Array.isArray(value)
+const object = (value: unknown): value is ObjectValue =>
+  typeof value === "object" && value !== null && !Array.isArray(value)
 
 const parse = (text: string): unknown => {
   try {
@@ -29,8 +30,8 @@ export function isFile(filepath: string) {
   return path.extname(filepath).toLowerCase() === ".ipynb"
 }
 
-export async function open(filepath: string): Promise<Readable> {
-  const raw = (await Encoding.read(filepath)).text
+export async function open(filepath: string, bytes: Buffer): Promise<Readable> {
+  const raw = Encoding.decode(bytes, Encoding.detect(bytes))
   const data = parse(raw)
   if (!object(data) || !Array.isArray(data.cells)) return Readable.from([raw])
 

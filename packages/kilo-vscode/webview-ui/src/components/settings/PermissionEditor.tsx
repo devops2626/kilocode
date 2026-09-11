@@ -9,7 +9,7 @@ import {
   addExceptionPatch,
   clearGroupedPatch,
   clearWildcardPatch,
-  effectiveRuleLevel,
+  effectiveConfigLevel,
   inheritedWildcard,
   mostRestrictive,
   permissionExceptions,
@@ -17,7 +17,6 @@ import {
   setExceptionPatch,
   setGroupedPatch,
   setWildcardPatch,
-  wildcardAction,
   type PermissionPatch,
 } from "./permission-utils"
 
@@ -112,14 +111,10 @@ const GROUPED_TOOLS: GroupedToolDef[] = [
     label: "todoread / todowrite",
     descriptionKey: "settings.autoApprove.tool.todoreadwrite",
   },
-  {
-    ids: ["websearch", "codesearch"],
-    label: "websearch / codesearch",
-    descriptionKey: "settings.autoApprove.tool.websearchcodesearch",
-  },
 ]
 
 const TRAILING_TOOLS: ToolDef[] = [
+  { id: "websearch", descriptionKey: "settings.autoApprove.tool.websearch" },
   { id: "webfetch", descriptionKey: "settings.autoApprove.tool.webfetch" },
   { id: "doom_loop", descriptionKey: "settings.autoApprove.tool.doom_loop" },
 ]
@@ -140,12 +135,12 @@ const PermissionEditor: Component<{
   description?: string
   component?: string
   inherited?: boolean
+  showDefaultLevel?: boolean
   onChange: (patch: PermissionPatch) => void
 }> = (props) => {
   const perms = createMemo(() => props.permissions ?? {})
 
-  const levelFor = (tool: string): PermissionLevel =>
-    wildcardAction(perms()[tool], effectiveRuleLevel(props.rules, tool))
+  const levelFor = (tool: string): PermissionLevel => effectiveConfigLevel(perms(), tool, props.rules)
 
   const ruleFor = (tool: string): PermissionRule | undefined => perms()[tool]
 
@@ -209,6 +204,7 @@ const PermissionEditor: Component<{
             fallback={levelFor(tool.id)}
             inherited={props.inherited && inheritedWildcard(ruleFor(tool.id))}
             allowInherit={props.inherited}
+            showDefaultLevel={props.showDefaultLevel}
             onWildcardChange={(level) => setWildcard(tool.id, level)}
             onWildcardInherit={() => clearWildcard(tool.id)}
             onExceptionChange={(pattern, level) => setException(tool.id, pattern, level)}
@@ -224,7 +220,8 @@ const PermissionEditor: Component<{
             id={tool.id}
             descriptionKey={tool.descriptionKey}
             level={levelFor(tool.id)}
-            inherited={props.inherited && ruleFor(tool.id) === undefined}
+            inherited={props.inherited && inheritedWildcard(ruleFor(tool.id))}
+            showDefaultLevel={props.showDefaultLevel}
             onChange={(level) => setSimple(tool.id, level)}
             onInherit={() => clearSimple(tool.id)}
           />
@@ -237,7 +234,8 @@ const PermissionEditor: Component<{
             id={group.label}
             descriptionKey={group.descriptionKey}
             level={mostRestrictive(group.ids.map(levelFor))}
-            inherited={props.inherited && group.ids.every((id) => ruleFor(id) === undefined)}
+            inherited={props.inherited && group.ids.every((id) => inheritedWildcard(ruleFor(id)))}
+            showDefaultLevel={props.showDefaultLevel}
             onChange={(level) => setGrouped(group.ids, level)}
             onInherit={() => clearGrouped(group.ids)}
           />
@@ -250,7 +248,8 @@ const PermissionEditor: Component<{
             id={tool.id}
             descriptionKey={tool.descriptionKey}
             level={levelFor(tool.id)}
-            inherited={props.inherited && ruleFor(tool.id) === undefined}
+            inherited={props.inherited && inheritedWildcard(ruleFor(tool.id))}
+            showDefaultLevel={props.showDefaultLevel}
             onChange={(level) => setSimple(tool.id, level)}
             onInherit={() => clearSimple(tool.id)}
           />
@@ -265,6 +264,7 @@ const SimpleToolRow: Component<{
   descriptionKey: string
   level: PermissionLevel
   inherited?: boolean
+  showDefaultLevel?: boolean
   onChange: (level: PermissionLevel) => void
   onInherit?: () => void
 }> = (props) => {
@@ -297,6 +297,7 @@ const SimpleToolRow: Component<{
       <ActionSelect
         level={props.level}
         inherited={props.inherited}
+        showDefaultLevel={props.showDefaultLevel}
         onChange={props.onChange}
         onInherit={props.onInherit}
       />
@@ -310,6 +311,7 @@ const GranularToolRow: Component<{
   fallback: PermissionLevel
   inherited?: boolean
   allowInherit?: boolean
+  showDefaultLevel?: boolean
   onWildcardChange: (level: PermissionLevel) => void
   onWildcardInherit: () => void
   onExceptionChange: (pattern: string, level: PermissionLevel) => void
@@ -329,8 +331,6 @@ const GranularToolRow: Component<{
   const excs = createMemo(() => permissionExceptions(props.rule))
   const expanded = createMemo(() => override() ?? excs().length <= 5)
   const toggle = () => setOverride(!expanded())
-  const level = createMemo(() => wildcardAction(props.rule, props.fallback))
-
   const submit = () => {
     const val = input().trim()
     if (val) {
@@ -379,8 +379,9 @@ const GranularToolRow: Component<{
           </div>
         </div>
         <ActionSelect
-          level={level()}
+          level={props.fallback}
           inherited={props.inherited}
+          showDefaultLevel={props.showDefaultLevel}
           onChange={props.onWildcardChange}
           onInherit={props.allowInherit ? props.onWildcardInherit : undefined}
         />
@@ -528,17 +529,23 @@ const GranularToolRow: Component<{
 const ActionSelect: Component<{
   level: PermissionLevel
   inherited?: boolean
+  showDefaultLevel?: boolean
   onChange: (level: PermissionLevel) => void
   onInherit?: () => void
 }> = (props) => {
   const language = useLanguage()
   const opts = createMemo(() => (props.onInherit ? [INHERIT_OPTION, ...LEVEL_OPTIONS] : LEVEL_OPTIONS))
+  const label = (option: LevelOption) => {
+    if (option.value !== "inherit" || !props.showDefaultLevel) return language.t(option.labelKey)
+    const level = LEVEL_OPTIONS.find((item) => item.value === props.level)!
+    return `${language.t(option.labelKey)} (${language.t(level.labelKey)})`
+  }
   return (
     <Select
       options={opts()}
       current={props.inherited ? INHERIT_OPTION : LEVEL_OPTIONS.find((option) => option.value === props.level)}
       value={(option) => option.value}
-      label={(option) => language.t(option.labelKey)}
+      label={label}
       onSelect={(option) => {
         if (!option) return
         if (option.value === "inherit") {

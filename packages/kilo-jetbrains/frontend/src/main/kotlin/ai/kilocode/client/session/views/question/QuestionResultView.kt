@@ -3,185 +3,189 @@ package ai.kilocode.client.session.views.question
 import ai.kilocode.client.plugin.KiloBundle
 import ai.kilocode.client.session.model.Content
 import ai.kilocode.client.session.model.Tool
+import ai.kilocode.client.session.ui.selection.SessionSelection
 import ai.kilocode.client.session.ui.style.SessionEditorStyle
 import ai.kilocode.client.session.ui.style.SessionUiStyle
-import ai.kilocode.client.session.views.base.PartView
-import ai.kilocode.client.session.views.ToolView
+import ai.kilocode.client.session.views.SessionViewIcons
+import ai.kilocode.client.session.views.base.AbstractSessionPartView
+import ai.kilocode.client.session.views.base.PartHeader
+import ai.kilocode.client.session.views.tool.ApprovalReasonTarget
+import ai.kilocode.client.session.views.tool.ToolApprovalFooter
+import ai.kilocode.client.session.views.tool.approvalReasonsVisible
 import ai.kilocode.client.ui.UiStyle
-import com.intellij.icons.AllIcons
+import com.intellij.openapi.Disposable
+import com.intellij.openapi.util.Disposer
 import com.intellij.ui.components.JBLabel
 import com.intellij.ui.components.JBTextArea
 import com.intellij.util.ui.JBUI
-import java.awt.BorderLayout
 import java.awt.Color
 import java.awt.Component
-import java.awt.Cursor
 import java.awt.Dimension
 import java.awt.Font
 import java.awt.Rectangle
-import java.awt.event.MouseAdapter
-import java.awt.event.MouseEvent
 import javax.swing.BoxLayout
+import javax.swing.JComponent
 import javax.swing.JPanel
-import javax.swing.SwingUtilities
 
-class QuestionResultView(tool: Tool) : PartView() {
+class QuestionResultView(
+    tool: Tool,
+    selection: SessionSelection? = null,
+    private val parts: QuestionParts = questionParts(selection),
+    private val footer: ToolApprovalFooter = ToolApprovalFooter(),
+) : AbstractSessionPartView(parts.header, { parts.body }, { footer }), ApprovalReasonTarget {
 
     override val contentId: String = tool.id
 
-    private var result = QuestionResultParser.parse(tool) ?: QuestionResult(emptyList(), emptyList())
+    private var result = parse(tool)
+    private var item = tool
     private var style = SessionEditorStyle.current()
-    private val texts = mutableListOf<Pair<JBTextArea, Boolean>>()
-
-    private val root = object : JPanel(BorderLayout()) {
-        override fun updateUI() {
-            super.updateUI()
-            isOpaque = true
-            background = SessionUiStyle.View.surface()
-            border = SessionUiStyle.View.card()
-        }
-    }
-    private val header = object : JPanel(BorderLayout(JBUI.scale(SessionUiStyle.View.CARD_LAYOUT_GAP), 0)) {
-        override fun updateUI() {
-            super.updateUI()
-            isOpaque = true
-            background = SessionUiStyle.View.header()
-            border = JBUI.Borders.empty(
-                JBUI.scale(SessionUiStyle.View.CARD_VERTICAL_PADDING),
-                JBUI.scale(SessionUiStyle.View.CARD_HORIZONTAL_PADDING),
-            )
-        }
-    }
-    private val glyph = JBLabel(AllIcons.General.Balloon)
-    private val title = JBLabel()
-    private val sub = JBLabel().apply { foreground = UiStyle.Colors.weak() }
-    private val arrow = JBLabel()
-    private val center = JPanel(BorderLayout(JBUI.scale(SessionUiStyle.View.CARD_LAYOUT_GAP), 0)).apply {
-        isOpaque = false
-    }
-    private var pane: JPanel? = null
-
-    private val click = object : MouseAdapter() {
-        override fun mouseClicked(e: MouseEvent) { toggle() }
-    }
-
-    private val mouse = object : MouseAdapter() {
-        override fun mouseEntered(e: MouseEvent) { setHover(true) }
-        override fun mouseExited(e: MouseEvent) {
-            if (inside(e)) return
-            setHover(false)
-        }
-    }
 
     init {
-        layout = BorderLayout()
-        isOpaque = false
-
-        center.add(title, BorderLayout.WEST)
-        center.add(sub, BorderLayout.CENTER)
-        header.add(glyph, BorderLayout.WEST)
-        header.add(center, BorderLayout.CENTER)
-        header.add(arrow, BorderLayout.EAST)
-        root.add(header, BorderLayout.NORTH)
-
-        listOf(header, glyph, title, sub, arrow, center).forEach {
-            it.addMouseListener(click)
-            it.addMouseListener(mouse)
-            it.cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
-        }
-        header.cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
-
-        applyStyle(SessionEditorStyle.current())
-        add(root, BorderLayout.CENTER)
+        applyStyle(style)
         syncLabels()
-        syncArrow()
+        syncApprovalReason(approvalReasonsVisible())
+    }
+
+    override fun expand(): Boolean {
+        val changed = super.expand()
+        if (!changed) return false
+        parts.body.set(result.questions, result.answers)
+        return true
     }
 
     override fun update(content: Content) {
         if (content !is Tool) return
-        val next = QuestionResultParser.parse(content) ?: QuestionResult(emptyList(), emptyList())
-        if (next == result) return
+        item = content
+        val next = parse(content)
+        if (next == result) {
+            if (syncApprovalReason(approvalReasonsVisible())) refresh()
+            return
+        }
         result = next
         syncLabels()
-        syncBody()
+        if (isExpanded()) parts.body.set(result.questions, result.answers)
+        syncApprovalReason(approvalReasonsVisible())
         refresh()
     }
 
     override fun applyStyle(style: SessionEditorStyle) {
         this.style = style
-        val t = setFont(title, style.boldFont)
-        val s = setFont(sub, style.smallFont)
-        val label = t || s
-        val body = texts.fold(false) { acc, item -> setFont(item.first, item.second) || acc }
-        if (!label && !body) return
-        refresh()
+        var changed = setFont(parts.title, style.boldFont)
+        changed = setFont(parts.sub, style.smallFont) || changed
+        changed = parts.body.applyStyle(style) || changed
+        changed = footer.applyStyle(style) || changed
+        if (changed) refresh()
     }
 
-    fun toggle() {
-        if (isExpanded()) {
-            pane?.let { root.remove(it) }
-        } else {
-            root.add(body(), BorderLayout.CENTER)
-        }
-        syncArrow()
-        refresh()
+    override fun syncApprovalReason(visible: Boolean): Boolean {
+        val changed = footer.update(item, visible)
+        if (changed) refresh()
+        return changed
     }
 
-    fun isExpanded(): Boolean = pane?.parent === root
-
-    fun labelText(): String = listOf(title.text, sub.text).filter { it.isNotBlank() }.joinToString(" ")
+    fun labelText(): String = listOf(parts.title.text, parts.sub.text).filter { it.isNotBlank() }.joinToString(" ")
 
     fun bodyText(): String = result.questions.mapIndexed { i, q ->
         val joined = result.answers.getOrNull(i)?.joinToString(", ").orEmpty()
         listOf(q, joined.ifBlank { KiloBundle.message("session.question.review.notAnswered") }).joinToString("\n")
     }.joinToString("\n")
 
-    fun bodyCreated(): Boolean = pane != null
+    fun bodyCreated(): Boolean = hasBody()
 
-    fun bodyFonts(): List<Font> = texts.map { it.first.font }
+    fun bodyFonts(): List<Font> = parts.body.fonts()
 
-    fun titleFont(): Font = title.font
-    fun subFont(): Font = sub.font
+    fun titleFont(): Font = parts.title.font
+
+    fun subFont(): Font = parts.sub.font
+
+    override fun dispose() = parts.body.dispose()
 
     override fun dumpLabel(): String = "QuestionResultView#$contentId(${labelText()})"
+
+    private fun syncLabels() {
+        parts.title.text = KiloBundle.message("session.question.result.title")
+        val count = result.answers.count { it.isNotEmpty() }
+        parts.sub.text = KiloBundle.message("session.question.result.answered", count)
+        parts.sub.foreground = SessionUiStyle.Text.Secondary.foreground()
+    }
+
+    private fun setFont(label: JBLabel, font: Font): Boolean {
+        if (label.font == font) return false
+        label.font = font
+        return true
+    }
 
     companion object {
         fun canRender(tool: Tool): Boolean = QuestionResultParser.parse(tool) != null
     }
+}
 
-    private fun body(): JPanel {
-        pane?.let { return it }
-        val panel = object : JPanel() {
-            override fun updateUI() {
-                super.updateUI()
-                isOpaque = true
-                background = SessionUiStyle.View.surface()
-                border = JBUI.Borders.empty(
-                    JBUI.scale(SessionUiStyle.View.CARD_VERTICAL_PADDING),
-                    JBUI.scale(SessionUiStyle.View.CARD_HORIZONTAL_PADDING),
-                )
-            }
-        }.apply {
-            layout = BoxLayout(this, BoxLayout.Y_AXIS)
-        }
-        pane = panel
-        syncBody()
-        return panel
+class QuestionParts(
+    val header: PartHeader,
+    val glyph: JBLabel,
+    val title: JBLabel,
+    val sub: JBLabel,
+    val body: QuestionResultBody,
+)
+
+private fun questionParts(selection: SessionSelection?): QuestionParts {
+    val glyph = JBLabel(SessionViewIcons.bubble)
+    val title = JBLabel()
+    val sub = JBLabel().apply { foreground = SessionUiStyle.Text.Secondary.foreground() }
+    val header = PartHeader().apply {
+        leading(glyph)
+        left(title)
+        titleGap()
+        left(sub)
+    }
+    return QuestionParts(header, glyph, title, sub, QuestionResultBody(selection))
+}
+
+private fun parse(tool: Tool) = QuestionResultParser.parse(tool) ?: QuestionResult(emptyList(), emptyList())
+
+/** Lazy body for [QuestionResultView]: a transparent column of question/answer text areas. */
+class QuestionResultBody(private val selection: SessionSelection?) : JPanel() {
+
+    private var questions: List<String> = emptyList()
+    private var answers: List<List<String>> = emptyList()
+    private var style = SessionEditorStyle.current()
+    private val texts = mutableListOf<Pair<JBTextArea, Boolean>>()
+    private val regs = mutableListOf<Disposable>()
+
+    init {
+        isOpaque = false
+        layout = BoxLayout(this, BoxLayout.Y_AXIS)
+        // Transparent answers body: the base separates it from the header with the standard gap, so
+        // only content padding remains — no separator line.
+        border = JBUI.Borders.empty(
+            JBUI.scale(SessionUiStyle.View.Layout.VERTICAL_PADDING),
+            JBUI.scale(SessionUiStyle.View.Layout.HORIZONTAL_PADDING),
+        )
     }
 
-    private fun syncLabels() {
-        title.text = KiloBundle.message("session.question.result.title")
-        val count = result.answers.count { it.isNotEmpty() }
-        sub.text = KiloBundle.message("session.question.result.answered", count)
-        sub.foreground = UiStyle.Colors.weak()
+    fun set(questions: List<String>, answers: List<List<String>>) {
+        this.questions = questions
+        this.answers = answers
+        rebuild()
     }
 
-    private fun syncBody() {
-        val panel = pane ?: return
-        panel.removeAll()
+    fun applyStyle(style: SessionEditorStyle): Boolean {
+        this.style = style
+        return texts.fold(false) { acc, item -> setFont(item.first, item.second) || acc }
+    }
+
+    fun fonts(): List<Font> = texts.map { it.first.font }
+
+    fun dispose() {
+        disposeRegs()
         texts.clear()
+    }
 
-        for ((i, q) in result.questions.withIndex()) {
+    private fun rebuild() {
+        removeAll()
+        disposeRegs()
+        texts.clear()
+        for ((i, q) in questions.withIndex()) {
             val row = JPanel().apply {
                 isOpaque = false
                 layout = BoxLayout(this, BoxLayout.Y_AXIS)
@@ -189,20 +193,23 @@ class QuestionResultView(tool: Tool) : PartView() {
             }
             if (i > 0) row.border = JBUI.Borders.emptyTop(UiStyle.Gap.lg())
 
-            val qText = makeText(q, UiStyle.Colors.weak(), false)
+            val qText = makeText(q, SessionUiStyle.Text.Secondary.foreground(), false)
             qText.alignmentX = Component.LEFT_ALIGNMENT
+            qText.border = JBUI.Borders.emptyBottom(UiStyle.Gap.xs())
             row.add(qText)
 
-            val joined = result.answers.getOrNull(i)?.joinToString(", ").orEmpty()
+            val joined = answers.getOrNull(i)?.joinToString(", ").orEmpty()
             val aText = makeText(
                 joined.ifBlank { KiloBundle.message("session.question.review.notAnswered") },
-                UiStyle.Colors.fg(),
+                SessionUiStyle.Colors.foreground(),
                 true,
             )
             aText.alignmentX = Component.LEFT_ALIGNMENT
             row.add(aText)
-            panel.add(row)
+            add(row)
         }
+        revalidate()
+        repaint()
     }
 
     private fun makeText(value: String, color: Color, bold: Boolean): JBTextArea {
@@ -249,32 +256,14 @@ class QuestionResultView(tool: Tool) : PartView() {
             border = JBUI.Borders.empty()
         }
         texts.add(area to bold)
+        selection?.register(area)?.let(regs::add)
         setFont(area, bold)
         return area
     }
 
-    private fun syncArrow() {
-        arrow.icon = if (isExpanded()) AllIcons.General.ArrowDown else AllIcons.General.ArrowRight
-    }
-
-    private fun setHover(value: Boolean) {
-        val color = if (value) SessionUiStyle.View.headerHover() else SessionUiStyle.View.header()
-        if (header.background?.rgb == color.rgb) return
-        header.background = color
-        root.border = if (value) SessionUiStyle.View.card(SessionUiStyle.View.hoverLine()) else SessionUiStyle.View.card()
-        header.repaint()
-        root.repaint()
-    }
-
-    private fun inside(e: MouseEvent): Boolean {
-        val point = SwingUtilities.convertPoint(e.component, e.point, header)
-        return header.contains(point)
-    }
-
-    private fun setFont(label: JBLabel, font: Font): Boolean {
-        if (label.font == font) return false
-        label.font = font
-        return true
+    private fun disposeRegs() {
+        regs.forEach(Disposer::dispose)
+        regs.clear()
     }
 
     private fun setFont(area: JBTextArea, bold: Boolean): Boolean {
@@ -282,10 +271,5 @@ class QuestionResultView(tool: Tool) : PartView() {
         if (area.font == font) return false
         area.font = font
         return true
-    }
-
-    private fun refresh() {
-        revalidate()
-        repaint()
     }
 }

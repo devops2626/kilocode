@@ -34,6 +34,7 @@ bun run merge.ts --version v1.1.50 --base-branch catrielmuller/kilo-opencode-v1.
 | `merge.ts` | Main orchestration script for upstream merges |
 | `list-versions.ts` | List available upstream versions |
 | `analyze.ts` | Analyze changes without merging |
+| `opencode-changesets.ts` | Generate Kilo changesets from upstream opencode release notes |
 | `fix-kilocode-markers.ts` | Rebuild `kilocode_change` markers for one file against the last merged upstream |
 | `reset-to-upstream.ts` | Reset one file to the transformed last merged upstream version |
 | `find-reset-candidates.ts` | Bulk-find files that have drifted insignificantly from upstream and (optionally) reset them |
@@ -46,9 +47,10 @@ bun run merge.ts --version v1.1.50 --base-branch catrielmuller/kilo-opencode-v1.
 | `transforms/preserve-versions.ts` | Preserve Kilo's package versions |
 | `transforms/keep-ours.ts` | Keep Kilo's version of specific files |
 | `transforms/skip-files.ts` | Skip/remove files that shouldn't exist in Kilo |
+| `transforms/remove-kilo-web.ts` | Remove the unsupported embedded web command and warn when upstream reshapes it |
 | `transforms/transform-i18n.ts` | Transform i18n files with Kilo branding |
 | `transforms/transform-take-theirs.ts` | Take upstream + apply Kilo branding for branding-only files |
-| `transforms/transform-package-json.ts` | Enhanced package.json with Kilo dependency injection |
+| `transforms/transform-package-json.ts` | Enhanced package.json with Kilo dependency injection and newest-Bun-wins reconciliation |
 | `transforms/transform-scripts.ts` | Transform script files with GitHub API references |
 | `transforms/transform-extensions.ts` | Transform extension files (Zed, etc.) |
 | `transforms/transform-web.ts` | Transform web/docs files (.mdx) |
@@ -59,6 +61,16 @@ bun run merge.ts --version v1.1.50 --base-branch catrielmuller/kilo-opencode-v1.
 |---|---|
 | `codemods/transform-imports.ts` | Transform import statements using ts-morph |
 | `codemods/transform-strings.ts` | Transform string literals |
+
+## Release Notes Changesets
+
+After merging upstream opencode releases, use `opencode-changesets.ts` to turn the upstream GitHub release notes into Kilo changesets:
+
+```bash
+bun script/upstream/opencode-changesets.ts --from 1.17.0 --to 1.17.7
+```
+
+The script fetches releases from `anomalyco/opencode`, selects published releases in the semver range `(from, to]`, and writes one `.changeset/opencode-vX-Y-Z-to-vX-Y-Z.md` file for the whole range. It requires the target release to exist, merges notes from every release into shared `##` sections and `###` categories, then folds those headings into each bullet (for example, `Core Bugfixes: ...`) so Changesets can embed the notes cleanly in package changelogs. It generates a patch changeset for the fixed release group, `@kilocode/cli` and `kilo-code`. Generated notes omit contributor thank-you blocks and the upstream `Desktop` and `SDK` sections by default because Kilo does not ship the opencode desktop app and SDK release notes are not user-facing for Kilo.
 
 ## Merge Process
 
@@ -79,6 +91,7 @@ The merge automation follows this process, applying **all transformations BEFORE
 
 5. **Apply ALL transformations to upstream branch (PRE-MERGE)**:
    - Remove files that should not exist in Kilo (`skipFiles`)
+   - Remove the unsupported embedded web command and its CLI registration
    - Transform package names (opencode-ai -> @kilocode/cli)
    - Preserve Kilo's versions
    - Transform i18n files with Kilo branding
@@ -196,6 +209,10 @@ Now:
 
 The only remaining conflicts are files with **actual code differences** - files with `kilocode_change` markers that contain Kilo-specific logic.
 
+### Bun Version Safety
+
+Root `package.json` reconciliation uses the newer valid `packageManager` Bun version from Kilo and upstream. An older upstream version cannot downgrade Kilo, while a newer upstream version is retained as an upgrade. Before the merge is finalized, `merge.ts` also validates the result against the pristine Kilo base and upstream commit and aborts if the merged Bun version is lower than either input.
+
 ## CLI Options
 
 ### merge.ts
@@ -207,7 +224,7 @@ Options:
   --base-branch <name>   Base branch to merge into; use HEAD for current branch (default: main)
   --dry-run              Preview changes without applying them
   --no-push              Don't push branches to remote
-  --no-worktrees         Don't create reference worktrees
+  --no-worktrees         Don't create auxiliary worktrees, including rerere training worktrees
   --report-only          Only generate conflict report
   --verbose              Enable verbose logging
   --author <name>        Author name for branch prefix
@@ -308,6 +325,8 @@ Tighten the blast radius with `--review-limit 0` (only `markers-only` and `cosme
 By default, upstream merges start from the `main` branch. However, you can use `--base-branch` to start from a different branch. This is useful for:
 
 Passing `--base-branch HEAD` targets the currently checked-out branch without typing its full name.
+It uses the checked-out commit without pulling. If the current branch already has the generated
+target name, the script keeps and merges into that branch instead of backing it up and recreating it.
 
 ### Incremental Merges
 

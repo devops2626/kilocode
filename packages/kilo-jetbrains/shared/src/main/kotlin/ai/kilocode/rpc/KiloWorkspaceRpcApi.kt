@@ -1,7 +1,13 @@
 package ai.kilocode.rpc
 
+import ai.kilocode.rpc.dto.ConfigTargetDto
+import ai.kilocode.rpc.dto.DiffFileDto
+import ai.kilocode.rpc.dto.FileSearchResultDto
 import ai.kilocode.rpc.dto.KiloWorkspaceStateDto
+import ai.kilocode.rpc.dto.ModelsWorkspaceDto
+import ai.kilocode.rpc.dto.SetupScriptTargetDto
 import ai.kilocode.rpc.dto.WorkspaceFileDto
+import com.intellij.platform.project.ProjectId
 import com.intellij.platform.rpc.RemoteApiProviderService
 import fleet.rpc.RemoteApi
 import fleet.rpc.Rpc
@@ -26,11 +32,11 @@ interface KiloWorkspaceRpcApi : RemoteApi<Unit> {
     /**
      * Resolve the real project directory as seen by the backend.
      *
-     * In split mode, the frontend's [Project.getBasePath] returns a
-     * synthetic sandbox path. This method returns the backend's actual
-     * project directory so the frontend can use it for CLI server calls.
+     * [projectId] identifies the exact calling frontend project across the
+     * frontend/backend boundary. [hint] is the frontend's project path and is
+     * used as a fallback if the project cannot be resolved on the backend.
      */
-    suspend fun resolveProjectDirectory(hint: String): String
+    suspend fun resolveProjectDirectory(projectId: ProjectId?, hint: String): String
 
     /** Observe workspace state loading progress. */
     suspend fun state(directory: String): Flow<KiloWorkspaceStateDto>
@@ -38,9 +44,46 @@ interface KiloWorkspaceRpcApi : RemoteApi<Unit> {
     /** Trigger a full reload of workspace data. */
     suspend fun reload(directory: String)
 
+    /** Fetch only the providers and agents needed by Models settings. */
+    suspend fun models(directory: String): ModelsWorkspaceDto
+
     /** Resolve [path] to matching files, scoped primarily to [directory]. */
     suspend fun files(directory: String, path: String): List<WorkspaceFileDto>
 
+    /** Fuzzy file/folder search via Kilo Core. */
+    suspend fun searchFiles(directory: String, query: String, limit: Int = 50): FileSearchResultDto
+
+    /** Current uncommitted git changes as a unified diff for @git-changes mentions. */
+    suspend fun gitChanges(directory: String): String?
+
+    suspend fun branchDiff(directory: String, patches: Boolean = true): List<DiffFileDto>
+
+    suspend fun localDiff(directory: String, patches: Boolean = true): List<DiffFileDto>
+
+    /** Current git branch name for branch-scoped UI labels. */
+    suspend fun branchName(directory: String): String?
+
     /** Open an absolute backend file path in the IDE. */
-    suspend fun openFile(path: String): Boolean
+    suspend fun openFile(path: String, line: Int? = null, column: Int? = null, endLine: Int? = null): Boolean
+
+    /** Resolve the editable local config target. */
+    suspend fun localConfigTarget(directory: String): ConfigTargetDto
+
+    /** Resolve the editable global config target. */
+    suspend fun globalConfigTarget(): ConfigTargetDto
+
+    /** Refresh local and global config files after external CLI writes. */
+    suspend fun refreshConfigFiles(directory: String)
+
+    /** Open or create the local config file in the IDE. */
+    suspend fun openLocalConfig(directory: String): Boolean
+
+    /** Open or create the global config file in the IDE. */
+    suspend fun openGlobalConfig(): Boolean
+
+    /** Resolve the worktree setup script target for the repo rooted at [directory]. */
+    suspend fun setupScriptTarget(directory: String): SetupScriptTargetDto
+
+    /** Open or create the worktree setup script in the IDE. */
+    suspend fun openSetupScript(directory: String): Boolean
 }

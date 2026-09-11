@@ -7,7 +7,7 @@ description: "How to add credits to your Kilo Code account"
 
 Once you've used any initial free Kilo Credits, you can easily add more:
 
-- Subscribe to the [Kilo Pass](https://kilo.ai/features/kilo-pass), the most cost effective way to add credits.
+- Subscribe to the [Kilo Pass](https://kilo.ai/pricing/kilo-pass), the most cost effective way to add credits.
 - Purchase additional credits as a one-time transaction.
 - Enable [automatic top-up](https://kilo.ai/features/auto-top-ups), which purchases additional credits when your balance runs low. Auto top-up is available for both individual and organization accounts.
 
@@ -19,11 +19,12 @@ You can also use subscriptions or credits you may have purchased directly with a
 
 At Kilo Code, we believe in complete pricing transparency:
 
-- Our pricing matches the model provider's API rates exactly
-- We don't take any commission or markup.
-- $1 you give us becomes $1 of Kilo credits
-- We debit your Kilo credits exactly what the provider charges us in dollars
-- You only pay for what you use with no hidden fees
+- Model inference through Kilo Gateway matches the provider's API rates with no markup.
+- We debit your Kilo credits by the amount charged for inference or other metered Kilo services, such as cloud compute.
+- $1 of purchased credits funds $1 of usage.
+- A 5% payment-processing fee applies when you purchase credits. This fee is charged separately and does not increase your credit balance.
+
+For current platform, inference, credit purchase, and cloud compute pricing, see [Kilo Code pricing](https://kilo.ai/pricing).
 
 ## Future Plans
 

@@ -1,3 +1,4 @@
+import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { describe, expect } from "bun:test"
 import { Cause, Effect, Exit, Fiber, Layer } from "effect"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
@@ -6,7 +7,7 @@ import { Question } from "../../src/question"
 import { MessageID, SessionID } from "../../src/session/schema"
 import { testEffect } from "../lib/effect"
 
-const it = testEffect(Layer.mergeAll(Question.defaultLayer, CrossSpawnSpawner.defaultLayer))
+const it = testEffect(Layer.mergeAll(AppNodeBuilder.build(Question.node), AppNodeBuilder.build(CrossSpawnSpawner.node)))
 
 const prompt = [
   {
@@ -86,7 +87,7 @@ describe("Question.dismissAll", () => {
 
         const first = yield* KiloSessionPromptQueue.enqueue(
           sessionID,
-          MessageID.make("message_ask_1"),
+          MessageID.make("msg_ask_1"),
           Effect.gen(function* () {
             started.resolve()
             yield* Effect.promise(() => release.promise)
@@ -98,7 +99,7 @@ describe("Question.dismissAll", () => {
 
         const second = yield* KiloSessionPromptQueue.enqueue(
           sessionID,
-          MessageID.make("message_ask_2"),
+          MessageID.make("msg_ask_2"),
           Effect.succeed("second" as const),
           Effect.succeed("second-cancelled" as const),
         ).pipe(Effect.forkScoped)

@@ -107,7 +107,22 @@
     & > * {
       max-width: 100%;
     }
+
+    [data-slot="popover-trigger"] {
+      min-width: 0;
+      max-width: 100%;
+    }
   }
+}
+
+.settings-branch-trigger {
+  max-width: 160px;
+}
+
+.settings-branch-trigger-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* Wider inputs inside cards with data-variant="wide-input" (e.g. edit mode config) */
@@ -133,4 +148,17 @@
     font-size: var(--font-size-small);
     text-align: right;
   }
+}
+
+/* Skill Folder Paths / Skill URLs row: tooltip trigger that grows in the
+   flex row and lets the inner span truncate. Applied via Tooltip class. */
+.settings-skills-row-trigger {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Wrap long skill paths/URLs within the shared 320px tooltip width. */
+.settings-skills-tooltip-content {
+  white-space: normal;
+  overflow-wrap: anywhere;
 }

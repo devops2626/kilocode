@@ -44,6 +44,7 @@ const EXCLUDE_PATTERNS = [
   /^https?:\/\/synthetic\.new/,
   // API endpoints (not user-facing)
   /^https?:\/\/api\.kilo\.ai\/api\//,
+  /^https?:\/\/supermassive-black-hole\.kiloapps\.io\/v1\/session-export\//, // kilocode_change
   /^https?:\/\/ingest\.kilosessions\.ai/,
   /^https?:\/\/api\.openai\.com/,
   /^https?:\/\/api\.github\.com/,
@@ -85,13 +86,14 @@ const SKIP_DIRS = ["node_modules", ".storybook", "stories", "test", "tests", "__
 const SKIP_PATH_SEGMENTS = ["continuedev"]
 
 // Individual files to skip (data files full of non-user-facing URLs)
-const SKIP_FILES = ["models-snapshot.ts", "models-snapshot.js", "check-forbidden-strings.ts"] // kilocode_change
+const SKIP_FILES = ["check-forbidden-strings.ts"] // kilocode_change
 
 function shouldExclude(url: string): boolean {
   return EXCLUDE_PATTERNS.some((re) => re.test(url))
 }
 
 function shouldSkipFile(filepath: string): boolean {
+  if (filepath === "packages/opencode/src/cli/cmd/account.ts") return true // kilocode_change - command is not registered in Kilo
   const rel = path.relative(ROOT, filepath)
   const parts = rel.split(path.sep)
   if (parts.some((p) => SKIP_DIRS.includes(p))) return true

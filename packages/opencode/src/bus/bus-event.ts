@@ -1,6 +1,5 @@
-import z from "zod"
 import { Schema } from "effect"
-import { zodObject } from "@/util/effect-zod"
+import { EventManifest } from "@/event-manifest" // kilocode_change
 
 export type Definition<Type extends string = string, Properties extends Schema.Top = Schema.Top> = {
   type: Type
@@ -18,34 +17,30 @@ export function define<Type extends string, Properties extends Schema.Top>(
   return result
 }
 
-export function payloads() {
-  return registry
-    .entries()
-    .map(([type, def]) => {
-      return z
-        .object({
-          id: z.string(),
-          type: z.literal(type),
-          properties: zodObject(def.properties),
-        })
-        .meta({
-          ref: `Event.${def.type}`,
-        })
-    })
-    .toArray()
-}
-
 export function effectPayloads() {
-  return registry
-    .entries()
-    .map(([type, def]) =>
-      Schema.Struct({
-        id: Schema.String,
-        type: Schema.Literal(type),
-        properties: def.properties,
-      }).annotate({ identifier: `Event.${type}` }),
-    )
-    .toArray()
+  return [
+    ...registry
+      .entries()
+      .map(([type, def]) =>
+        Schema.Struct({
+          id: Schema.String,
+          type: Schema.Literal(type),
+          properties: def.properties,
+        }).annotate({ identifier: `Event.${type}` }),
+      )
+      .toArray(),
+    // kilocode_change start - expose current Effect events through legacy bus schemas
+    ...EventManifest.Latest.values()
+      .map((definition) =>
+        Schema.Struct({
+          id: Schema.String,
+          type: Schema.Literal(definition.type),
+          properties: definition.data,
+        }).annotate({ identifier: `Event.${definition.type}` }),
+      )
+      .toArray(),
+    // kilocode_change end
+  ]
 }
 
 export * as BusEvent from "./bus-event"

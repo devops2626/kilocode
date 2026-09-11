@@ -1,23 +1,35 @@
 import { AccountID, OrgID } from "@/account/schema"
 import { Snapshot } from "@/snapshot" // kilocode_change
 import { MCP } from "@/mcp"
-import { ProviderID, ModelID } from "@/provider/schema"
+
 import { Session } from "@/session/session"
 import { WorktreeDiff } from "@/kilocode/review/worktree-diff" // kilocode_change
+import { SessionID } from "@/session/schema"
 import { Worktree } from "@/worktree"
-import { NonNegativeInt } from "@/util/schema"
-import { Schema, SchemaGetter } from "effect"
-import { HttpApi, HttpApiEndpoint, HttpApiError, HttpApiGroup, OpenApi } from "effect/unstable/httpapi"
+import { NonNegativeInt } from "@opencode-ai/core/schema"
+import { Schema } from "effect"
+import { HttpApi, HttpApiEndpoint, HttpApiError, HttpApiGroup, HttpApiSchema, OpenApi } from "effect/unstable/httpapi"
 import { Authorization } from "../middleware/authorization"
 import { InstanceContextMiddleware } from "../middleware/instance-context"
-import { WorkspaceRoutingMiddleware } from "../middleware/workspace-routing"
+import {
+  WorkspaceRoutingMiddleware,
+  WorkspaceRoutingQuery,
+  WorkspaceRoutingQueryFields,
+} from "../middleware/workspace-routing"
 import { described } from "./metadata"
+import { QueryBoolean } from "./query"
+import { ProviderV2 } from "@opencode-ai/core/provider"
+import { ModelV2 } from "@opencode-ai/core/model"
 
 const ConsoleStateResponse = Schema.Struct({
   consoleManagedProviders: Schema.mutable(Schema.Array(Schema.String)),
   activeOrgName: Schema.optionalKey(Schema.String),
   switchableOrgCount: NonNegativeInt,
 }).annotate({ identifier: "ConsoleState" })
+
+const CapabilitiesResponse = Schema.Struct({
+  backgroundSubagents: Schema.Boolean,
+}).annotate({ identifier: "ExperimentalCapabilities" })
 
 const ConsoleOrgOption = Schema.Struct({
   accountID: Schema.String,
@@ -45,22 +57,38 @@ const ToolListItem = Schema.Struct({
 }).annotate({ identifier: "ToolListItem" })
 const ToolList = Schema.Array(ToolListItem).annotate({ identifier: "ToolList" })
 export const ToolListQuery = Schema.Struct({
-  provider: ProviderID,
-  model: ModelID,
+  ...WorkspaceRoutingQueryFields,
+  provider: ProviderV2.ID,
+  model: ModelV2.ID,
 })
 
-const QueryBoolean = Schema.Literals(["true", "false"]).pipe(
-  Schema.decodeTo(Schema.Boolean, {
-    decode: SchemaGetter.transform((value) => value === "true"),
-    encode: SchemaGetter.transform((value) => (value ? "true" : "false")),
-  }),
+// kilocode_change start
+const WorktreeList = Schema.Array(
+  Schema.Struct({ directory: Schema.String, managed: Schema.Boolean }).annotate({ identifier: "WorktreeListItem" }),
 )
-const WorktreeList = Schema.Array(Schema.String)
+// kilocode_change end
+const WorktreeErrorName = Schema.Union([
+  Schema.Literal("WorktreeNotGitError"),
+  Schema.Literal("WorktreeNameGenerationFailedError"),
+  Schema.Literal("WorktreeCreateFailedError"),
+  Schema.Literal("WorktreeStartCommandFailedError"),
+  Schema.Literal("WorktreeRemoveFailedError"),
+  Schema.Literal("WorktreeResetFailedError"),
+  Schema.Literal("WorktreeListFailedError"),
+])
+export class WorktreeApiError extends Schema.ErrorClass<WorktreeApiError>("WorktreeError")(
+  {
+    name: WorktreeErrorName,
+    data: Schema.Struct({ message: Schema.String }),
+  },
+  { httpApiStatus: 400 },
+) {}
 export const SessionListQuery = Schema.Struct({
+  ...WorkspaceRoutingQueryFields,
   // kilocode_change start
   projectID: Schema.optional(Schema.String),
-  directory: Schema.optional(Schema.String),
   worktrees: Schema.optional(QueryBoolean),
+  current: Schema.optional(QueryBoolean),
   // kilocode_change end
   roots: Schema.optional(QueryBoolean),
   start: Schema.optional(Schema.NumberFromString),
@@ -71,15 +99,18 @@ export const SessionListQuery = Schema.Struct({
 })
 // kilocode_change start
 export const WorktreeDiffQuery = Schema.Struct({
+  ...WorkspaceRoutingQueryFields,
   base: Schema.optional(Schema.String),
 })
 export const WorktreeDiffFileQuery = Schema.Struct({
+  ...WorkspaceRoutingQueryFields,
   base: Schema.optional(Schema.String),
   file: Schema.String,
 })
 // kilocode_change end
 
 export const ExperimentalPaths = {
+  capabilities: "/experimental/capabilities",
   console: "/experimental/console",
   consoleOrgs: "/experimental/console/orgs",
   consoleSwitch: "/experimental/console/switch",
@@ -91,6 +122,7 @@ export const ExperimentalPaths = {
   worktreeDiffSummary: "/experimental/worktree/diff/summary", // kilocode_change
   worktreeReset: "/experimental/worktree/reset",
   session: "/experimental/session",
+  sessionBackground: "/experimental/session/:sessionID/background",
   resource: "/experimental/resource",
 } as const
 
@@ -98,8 +130,20 @@ export const ExperimentalApi = HttpApi.make("experimental")
   .add(
     HttpApiGroup.make("experimental")
       .add(
+        HttpApiEndpoint.get("capabilities", ExperimentalPaths.capabilities, {
+          query: WorkspaceRoutingQuery,
+          success: described(CapabilitiesResponse, "Experimental capabilities"),
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "experimental.capabilities.get",
+            summary: "Get experimental capabilities",
+            description: "Get experimental features enabled on the OpenCode server.",
+          }),
+        ),
         HttpApiEndpoint.get("console", ExperimentalPaths.console, {
+          query: WorkspaceRoutingQuery,
           success: described(ConsoleStateResponse, "Active Console provider metadata"),
+          error: HttpApiError.InternalServerError,
         }).annotateMerge(
           OpenApi.annotations({
             identifier: "experimental.console.get",
@@ -108,7 +152,9 @@ export const ExperimentalApi = HttpApi.make("experimental")
           }),
         ),
         HttpApiEndpoint.get("consoleOrgs", ExperimentalPaths.consoleOrgs, {
+          query: WorkspaceRoutingQuery,
           success: described(ConsoleOrgList, "Switchable Console orgs"),
+          error: HttpApiError.InternalServerError,
         }).annotateMerge(
           OpenApi.annotations({
             identifier: "experimental.console.listOrgs",
@@ -117,6 +163,7 @@ export const ExperimentalApi = HttpApi.make("experimental")
           }),
         ),
         HttpApiEndpoint.post("consoleSwitch", ExperimentalPaths.consoleSwitch, {
+          query: WorkspaceRoutingQuery,
           payload: ConsoleSwitchPayload,
           success: described(Schema.Boolean, "Switch success"),
           error: HttpApiError.BadRequest,
@@ -124,7 +171,7 @@ export const ExperimentalApi = HttpApi.make("experimental")
           OpenApi.annotations({
             identifier: "experimental.console.switchOrg",
             summary: "Switch active Console org",
-            description: "Persist a new active Console account/org selection for the current local OpenCode state.",
+            description: "Persist a new active Console account/org selection for the current local Kilo state.",
           }),
         ),
         HttpApiEndpoint.get("tool", ExperimentalPaths.tool, {
@@ -140,6 +187,7 @@ export const ExperimentalApi = HttpApi.make("experimental")
           }),
         ),
         HttpApiEndpoint.get("toolIDs", ExperimentalPaths.toolIDs, {
+          query: WorkspaceRoutingQuery,
           success: described(ToolIDs, "Tool IDs"),
           error: HttpApiError.BadRequest,
         }).annotateMerge(
@@ -151,18 +199,22 @@ export const ExperimentalApi = HttpApi.make("experimental")
           }),
         ),
         HttpApiEndpoint.get("worktree", ExperimentalPaths.worktree, {
-          success: described(WorktreeList, "List of worktree directories"),
+          query: WorkspaceRoutingQuery,
+          success: described(WorktreeList, "List of worktrees"), // kilocode_change
+          error: WorktreeApiError,
         }).annotateMerge(
           OpenApi.annotations({
             identifier: "worktree.list",
             summary: "List worktrees",
-            description: "List all sandbox worktrees for the current project.",
+            description: "List all git worktrees for the current project and whether Kilo manages them.", // kilocode_change
           }),
         ),
         HttpApiEndpoint.post("worktreeCreate", ExperimentalPaths.worktree, {
-          payload: Schema.optional(Worktree.CreateInput),
+          disableCodecs: true,
+          query: WorkspaceRoutingQuery,
+          payload: [HttpApiSchema.NoContent, Worktree.CreateInput],
           success: described(Worktree.Info, "Worktree created"),
-          error: HttpApiError.BadRequest,
+          error: WorktreeApiError,
         }).annotateMerge(
           OpenApi.annotations({
             identifier: "worktree.create",
@@ -171,9 +223,10 @@ export const ExperimentalApi = HttpApi.make("experimental")
           }),
         ),
         HttpApiEndpoint.delete("worktreeRemove", ExperimentalPaths.worktree, {
+          query: WorkspaceRoutingQuery,
           payload: Worktree.RemoveInput,
           success: described(Schema.Boolean, "Worktree removed"),
-          error: HttpApiError.BadRequest,
+          error: WorktreeApiError,
         }).annotateMerge(
           OpenApi.annotations({
             identifier: "worktree.remove",
@@ -182,9 +235,10 @@ export const ExperimentalApi = HttpApi.make("experimental")
           }),
         ),
         HttpApiEndpoint.post("worktreeReset", ExperimentalPaths.worktreeReset, {
+          query: WorkspaceRoutingQuery,
           payload: Worktree.ResetInput,
           success: described(Schema.Boolean, "Worktree reset"),
-          error: HttpApiError.BadRequest,
+          error: WorktreeApiError,
         }).annotateMerge(
           OpenApi.annotations({
             identifier: "worktree.reset",
@@ -235,10 +289,24 @@ export const ExperimentalApi = HttpApi.make("experimental")
             identifier: "experimental.session.list",
             summary: "List sessions",
             description:
-              "Get a list of all OpenCode sessions across projects, sorted by most recently updated. Archived sessions are excluded by default.",
+              "Get a list of all Kilo sessions across projects, sorted by most recently updated. Archived sessions are excluded by default.",
+          }),
+        ),
+        HttpApiEndpoint.post("sessionBackground", ExperimentalPaths.sessionBackground, {
+          params: { sessionID: SessionID },
+          query: WorkspaceRoutingQuery,
+          success: described(Schema.Boolean, "Backgrounded subagents"),
+          error: HttpApiError.BadRequest,
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "experimental.session.background",
+            summary: "Background subagents",
+            description:
+              "Detach any synchronous subagents currently blocking the session and continue them in the background.",
           }),
         ),
         HttpApiEndpoint.get("resource", ExperimentalPaths.resource, {
+          query: WorkspaceRoutingQuery,
           success: described(Schema.Record(Schema.String, MCP.Resource), "MCP resources"),
         }).annotateMerge(
           OpenApi.annotations({

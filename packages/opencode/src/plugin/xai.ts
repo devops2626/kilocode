@@ -1,11 +1,8 @@
-// kilocode_change - new file
-import type { Hooks, PluginInput } from "@kilocode/plugin" // kilocode_change
-import * as Log from "@opencode-ai/core/util/log"
+import type { Hooks, PluginInput } from "@kilocode/plugin"
 import { OAUTH_DUMMY_KEY } from "../auth"
 import { createServer } from "http"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
-
-const log = Log.create({ service: "plugin.xai" })
+import { escapeHtml } from "@/util/html" // kilocode_change - retained OAuth error page uses escaped diagnostics
 
 // Public Grok-CLI OAuth client. xAI's auth server rejects loopback OAuth from
 // non-allowlisted clients, so we reuse the Grok-CLI client_id that xAI ships
@@ -78,25 +75,6 @@ function generateState(): string {
   return base64UrlEncode(crypto.getRandomValues(new Uint8Array(32)).buffer)
 }
 
-export function escapeHtml(value: string): string {
-  return value.replace(/[&<>"']/g, (char) => {
-    switch (char) {
-      case "&":
-        return "&amp;"
-      case "<":
-        return "&lt;"
-      case ">":
-        return "&gt;"
-      case '"':
-        return "&quot;"
-      case "'":
-        return "&#39;"
-      default:
-        return char
-    }
-  })
-}
-
 interface TokenResponse {
   access_token: string
   refresh_token: string
@@ -110,7 +88,7 @@ function authHeaders() {
   return {
     "Content-Type": "application/x-www-form-urlencoded",
     Accept: "application/json",
-    "User-Agent": `kilocode/${InstallationVersion}`,
+    "User-Agent": `kilocode/${InstallationVersion}`, // kilocode_change
   }
 }
 
@@ -119,7 +97,10 @@ function authHeaders() {
 // to make trust decisions, so unsigned decode is safe. Returns false for
 // opaque tokens (no JWT shape), which conservatively skips the proactive
 // refresh and lets the 401-on-call path drive the refresh instead.
-export function accessTokenIsExpiring(token: string | undefined, skewMs: number = ACCESS_TOKEN_REFRESH_SKEW_MS): boolean {
+export function accessTokenIsExpiring(
+  token: string | undefined,
+  skewMs: number = ACCESS_TOKEN_REFRESH_SKEW_MS,
+): boolean {
   if (!token || typeof token !== "string") return false
   const parts = token.split(".")
   if (parts.length < 2) return false
@@ -142,7 +123,9 @@ export function buildAuthorizeUrl(
 ): string {
   // `plan=generic` opts the consent screen into xAI's generic OAuth plan tier;
   // without it, accounts.x.ai rejects loopback OAuth from non-allowlisted
+  // kilocode_change start
   // clients. `referrer=kilocode` lets xAI attribute kilocode-originated
+  // kilocode_change end
   // logins in their OAuth server logs (best-effort attribution while we
   // continue to reuse the Grok-CLI client_id).
   const params = new URLSearchParams({
@@ -155,7 +138,7 @@ export function buildAuthorizeUrl(
     state,
     nonce,
     plan: "generic",
-    referrer: "kilocode",
+    referrer: "kilocode", // kilocode_change
   })
   return `${options.authorizeUrl ?? AUTHORIZE_URL}?${params.toString()}`
 }
@@ -304,6 +287,7 @@ export async function pollDeviceCodeToken(
   throw new Error("xAI device authorization timed out")
 }
 
+// kilocode_change start
 const HTML_SUCCESS = `<!doctype html>
 <html>
   <head>
@@ -393,7 +377,7 @@ const HTML_ERROR = (error: string) => `<!doctype html>
     </div>
   </body>
 </html>`
-
+// kilocode_change end
 // CORS allowlist for the loopback callback. The redirect_uri itself is
 // already bound to 127.0.0.1 and gated by PKCE+state, so we only accept
 // xAI's own auth origins for additional defense-in-depth on the OPTIONS
@@ -444,7 +428,7 @@ async function startOAuthServer(): Promise<{ port: number; redirectUri: string }
         pendingOAuth?.reject(new Error(errorMsg))
         pendingOAuth = undefined
         res.writeHead(200, { "Content-Type": "text/html" })
-        res.end(HTML_ERROR(errorMsg))
+        res.end(HTML_ERROR(errorMsg)) // kilocode_change - shared callback page is currently OpenCode-branded
         return
       }
 
@@ -453,7 +437,7 @@ async function startOAuthServer(): Promise<{ port: number; redirectUri: string }
         pendingOAuth?.reject(new Error(errorMsg))
         pendingOAuth = undefined
         res.writeHead(400, { "Content-Type": "text/html" })
-        res.end(HTML_ERROR(errorMsg))
+        res.end(HTML_ERROR(errorMsg)) // kilocode_change - shared callback page is currently OpenCode-branded
         return
       }
 
@@ -462,7 +446,7 @@ async function startOAuthServer(): Promise<{ port: number; redirectUri: string }
         pendingOAuth?.reject(new Error(errorMsg))
         pendingOAuth = undefined
         res.writeHead(400, { "Content-Type": "text/html" })
-        res.end(HTML_ERROR(errorMsg))
+        res.end(HTML_ERROR(errorMsg)) // kilocode_change - shared callback page is currently OpenCode-branded
         return
       }
 
@@ -474,7 +458,7 @@ async function startOAuthServer(): Promise<{ port: number; redirectUri: string }
         .catch((err) => current.reject(err))
 
       res.writeHead(200, { "Content-Type": "text/html" })
-      res.end(HTML_SUCCESS)
+      res.end(HTML_SUCCESS) // kilocode_change - shared callback page is currently OpenCode-branded
       return
     }
 
@@ -505,11 +489,11 @@ async function startOAuthServer(): Promise<{ port: number; redirectUri: string }
       // After listen() succeeds, install a permanent log-only listener so
       // that subsequent server errors (e.g. accept() failures, socket-level
       // errors) don't trip Node's default "unhandled error event = throw"
+      // kilocode_change start
       // behavior and crash the entire Kilocode process. Matches the silent-
+      // kilocode_change end
       // swallow behavior the Codex plugin gets from its permanent
       // `oauthServer!.on("error", reject)`.
-      server.on("error", (err) => log.warn("xai oauth server error", { error: err }))
-      log.info("xai oauth server started", { host: OAUTH_HOST, port: OAUTH_PORT })
       resolve()
     })
     oauthServer = server
@@ -520,7 +504,7 @@ async function startOAuthServer(): Promise<{ port: number; redirectUri: string }
 
 function stopOAuthServer() {
   if (oauthServer) {
-    oauthServer.close(() => log.info("xai oauth server stopped"))
+    oauthServer.close()
     oauthServer = undefined
   }
 }
@@ -605,7 +589,6 @@ export async function XaiAuthPlugin(input: PluginInput, options: XaiAuthPluginOp
             if (expiresSoon) {
               if (!refreshPromise) {
                 const refreshToken = currentAuth.refresh
-                log.info("refreshing xai access token")
                 refreshPromise = refreshAccessToken(refreshToken, options)
                   .then(async (tokens) => {
                     const refreshedExpires = Date.now() + (tokens.expires_in ?? 3600) * 1000
@@ -625,7 +608,7 @@ export async function XaiAuthPlugin(input: PluginInput, options: XaiAuthPluginOp
                           expires: refreshedExpires,
                         },
                       })
-                      .catch((err) => log.warn("failed to persist refreshed xai tokens", { error: err }))
+                      .catch(() => {})
                     return { access: tokens.access_token, refresh: refreshedRefresh, expires: refreshedExpires }
                   })
                   .finally(() => {
@@ -653,7 +636,7 @@ export async function XaiAuthPlugin(input: PluginInput, options: XaiAuthPluginOp
               }
             }
             headers.set("authorization", `Bearer ${currentAuth.access}`)
-            headers.set("User-Agent", `kilocode/${InstallationVersion}`)
+            headers.set("User-Agent", `kilocode/${InstallationVersion}`) // kilocode_change
 
             return fetch(requestInput, { ...init, headers })
           },
@@ -686,7 +669,6 @@ export async function XaiAuthPlugin(input: PluginInput, options: XaiAuthPluginOp
                     expires: Date.now() + (tokens.expires_in ?? 3600) * 1000,
                   }
                 } catch (err) {
-                  log.error("xai oauth callback failed", { error: err })
                   return { type: "failed" as const }
                 } finally {
                   stopOAuthServer()
@@ -723,7 +705,6 @@ export async function XaiAuthPlugin(input: PluginInput, options: XaiAuthPluginOp
                     expires: Date.now() + (tokens.expires_in ?? 3600) * 1000,
                   }
                 } catch (err) {
-                  log.error("xai device code callback failed", { error: err })
                   return { type: "failed" as const }
                 }
               },

@@ -1,6 +1,9 @@
+import type { KilocodeSessionModelUsageResponse } from "@kilocode/sdk/v2"
 import type { Part, TokenUsage } from "./parts"
 
-export type SessionCloseReason = "completed" | "error" | "interrupted"
+export type SessionModelUsage = KilocodeSessionModelUsageResponse
+
+export type SessionCloseReason = "completed" | "error" | "interrupted" | "superseded"
 
 // Message structure (simplified for webview)
 export interface Message {
@@ -19,6 +22,7 @@ export interface Message {
   parentID?: string
   path?: { cwd: string; root: string }
   error?: { name: string; data?: Record<string, unknown> }
+  sessionErrorID?: string
   summary?: { title?: string; body?: string; diffs?: unknown[] } | boolean
   cost?: number
   tokens?: TokenUsage
@@ -42,11 +46,18 @@ export interface SessionInfo {
   title?: string
   createdAt: string
   updatedAt: string
+  goal?: {
+    text: string
+    active: boolean
+    status?: "active" | "complete" | "blocked" | "paused"
+    reason?: string
+  } | null
   revert?: {
     messageID: string
     partID?: string
     snapshot?: string
     diff?: string
+    workspace?: "restored" | "snapshots-disabled" | "unavailable"
   } | null
   summary?: {
     additions: number
@@ -55,6 +66,12 @@ export interface SessionInfo {
     diffs?: SessionFileDiff[]
   } | null
 }
+
+export interface ProjectSessionInfo extends SessionInfo {
+  worktreeId: string | null
+}
+
+export type SessionUpdate = Partial<SessionInfo> & Pick<SessionInfo, "id">
 
 // Cloud session info (from Kilo cloud API)
 export interface CloudSessionInfo {

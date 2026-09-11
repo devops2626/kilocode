@@ -3,9 +3,10 @@ import { spawn } from "child_process"
 import fs from "fs/promises"
 import path from "path"
 import os from "os"
-import { Cause, Effect, Exit, Layer } from "effect"
+import { Cause, Effect, Exit } from "effect"
 import { testEffect } from "../lib/effect"
-import { AppFileSystem } from "@opencode-ai/core/filesystem"
+import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { EffectFlock } from "@opencode-ai/core/util/effect-flock"
 import { Global } from "@opencode-ai/core/global"
 import { Hash } from "@opencode-ai/core/util/hash"
@@ -58,27 +59,34 @@ function run(msg: Msg) {
   })
 }
 
+// kilocode_change start - make worker finalization await the process close event without a Windows race
+const closed = new WeakMap<ReturnType<typeof spawn>, Promise<void>>()
+
 function spawnWorker(msg: Msg) {
-  return spawn(process.execPath, [worker, JSON.stringify(msg)], {
+  const proc = spawn(process.execPath, [worker, JSON.stringify(msg)], {
     cwd: root,
     stdio: ["ignore", "pipe", "pipe"],
   })
+  closed.set(proc, new Promise((resolve) => proc.once("close", () => resolve())))
+  return proc
 }
 
-function stopWorker(proc: ReturnType<typeof spawnWorker>) {
-  if (proc.exitCode !== null || proc.signalCode !== null) return Promise.resolve()
+async function stopWorker(proc: ReturnType<typeof spawnWorker>) {
+  const close = closed.get(proc) ?? Promise.resolve()
+  if (proc.exitCode !== null || proc.signalCode !== null) return close
   if (process.platform !== "win32" || !proc.pid) {
     proc.kill()
-    return Promise.resolve()
+    return close
   }
-  return new Promise<void>((resolve) => {
-    const killProc = spawn("taskkill", ["/pid", String(proc.pid), "/T", "/F"])
-    killProc.on("close", () => {
-      proc.kill()
-      resolve()
-    })
+  await new Promise<void>((resolve) => {
+    const kill = spawn("taskkill", ["/pid", String(proc.pid), "/T", "/F"], { windowsHide: true })
+    kill.once("error", () => resolve())
+    kill.once("close", () => resolve())
   })
+  proc.kill()
+  return close
 }
+// kilocode_change end
 
 async function waitForFile(file: string, timeout = 3_000) {
   const stop = Date.now() + timeout
@@ -103,7 +111,7 @@ const testGlobal = Global.layerWith({
   log: os.tmpdir(),
 })
 
-const testLayer = EffectFlock.layer.pipe(Layer.provide(testGlobal), Layer.provide(AppFileSystem.defaultLayer))
+const testLayer = AppNodeBuilder.build(EffectFlock.node, [[Global.node, testGlobal]])
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -361,9 +369,8 @@ describe("util.effect-flock", () => {
         const proc = spawnWorker({ key: "eflock:crash", dir, ready, holdMs: 120_000 })
 
         try {
-          await waitForFile(ready, 5_000)
-          await stopWorker(proc)
-          await new Promise((resolve) => proc.on("close", resolve))
+          await waitForFile(ready, 20_000) // kilocode_change - hosted macOS can start this worker slowly after stress tests
+          await stopWorker(proc) // kilocode_change - stopWorker now awaits close before returning
 
           // Backdate lock files so they're past STALE_MS (60s)
           const lockDir = lock(dir, "eflock:crash")
@@ -381,6 +388,6 @@ describe("util.effect-flock", () => {
           await fs.rm(tmp, { recursive: true, force: true })
         }
       }),
-    30_000,
+    60_000, // kilocode_change - match the wider worker readiness window
   )
 })

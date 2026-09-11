@@ -2,9 +2,62 @@ import { Icon as Upstream, type IconProps as Props } from "@opencode-ai/ui/icon"
 import { splitProps } from "solid-js"
 
 const icons: Record<string, { path: string; viewBox: string }> = {
+  "circle-x-outline": {
+    viewBox: "0 0 20 20",
+    path: `<path d="M7.5 7.5L12.5 12.5M12.5 7.5L7.5 12.5M18.3333 10C18.3333 14.6024 14.6024 18.3333 10 18.3333C5.39763 18.3333 1.66667 14.6024 1.66667 10C1.66667 5.39763 5.39763 1.66667 10 1.66667C14.6024 1.66667 18.3333 5.39763 18.3333 10Z" stroke="currentColor" stroke-linecap="square"/>`,
+  },
+  "pull-request": {
+    viewBox: "0 0 20 20",
+    // Stroked at 1.25 on the 20-unit grid (1px at 16px) to match the other outline icons.
+    path: `<circle cx="4.6875" cy="4.0625" r="1.875" stroke="currentColor" stroke-width="1.25"/><circle cx="4.6875" cy="15.9375" r="1.875" stroke="currentColor" stroke-width="1.25"/><circle cx="15.9375" cy="15.9375" r="1.875" stroke="currentColor" stroke-width="1.25"/><path d="M4.6875 5.9375V14.0625M15.9375 14.0625V6.25A2.5 2.5 0 0 0 13.4375 3.75H9.6875M11.5625 1.875L9.6875 3.75L11.5625 5.625" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/>`,
+  },
+  "git-commit": {
+    viewBox: "0 0 20 20",
+    path: `<circle cx="10" cy="10" r="2.5" stroke="currentColor" stroke-width="1.25"/><path d="M1.875 10H7.5M12.5 10H18.125" stroke="currentColor" stroke-width="1.25" stroke-linecap="square"/>`,
+  },
+  "git-merge": {
+    viewBox: "0 0 20 20",
+    path: `<circle cx="5" cy="5" r="2.5" stroke="currentColor" stroke-width="1.25"/><circle cx="15" cy="15" r="2.5" stroke="currentColor" stroke-width="1.25"/><path d="M5 17.5V7.5A7.5 7.5 0 0 0 12.5 15" stroke="currentColor" stroke-width="1.25" stroke-linecap="square"/>`,
+  },
+  refresh: {
+    viewBox: "0 0 20 20",
+    path: `<path d="M17.0837 10.0003C17.0837 13.9123 13.9123 17.0837 10.0003 17.0837C6.08833 17.0837 2.91699 13.9123 2.91699 10.0003C2.91699 6.08833 6.08833 2.91699 10.0003 2.91699C12.3717 2.91699 14.4722 4.07428 15.7698 5.83366M15.7698 5.83366V2.91699M15.7698 5.83366H12.8532" stroke="currentColor" stroke-linecap="square"/>`,
+  },
+  memory: {
+    viewBox: "0 0 24 24",
+    path: `<path d="M2 7h4M2 12h4M2 17h4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><rect width="16" height="20" x="4" y="2" rx="2" stroke="currentColor" stroke-width="1.5"/>`,
+  },
+  database: {
+    viewBox: "0 0 24 24",
+    path: `<ellipse cx="12" cy="5" rx="7" ry="3" stroke="currentColor" stroke-width="1.5"/><path d="M5 5v7c0 1.66 3.13 3 7 3s7-1.34 7-3V5M5 12v7c0 1.66 3.13 3 7 3s7-1.34 7-3v-7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>`,
+  },
+  extensions: {
+    viewBox: "0 0 20 20",
+    path: `<path d="M8.5 2.5h3v3h3v3h3v3h-3v3h-3v3h-3v-3h-3v-3h-3v-3h3v-3h3v-3Z" stroke="currentColor" stroke-width="1.25" stroke-linejoin="round"/>`,
+  },
+  "book-open-check": {
+    viewBox: "0 0 24 24",
+    path: `<path d="M12 21V7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="m16 12 2 2 4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M22 6V4a1 1 0 0 0-1-1h-5a4 4 0 0 0-4 4 4 4 0 0 0-4-4H3a1 1 0 0 0-1 1v13a1 1 0 0 0 1 1h6a3 3 0 0 1 3 3 3 3 0 0 1 3-3h6a1 1 0 0 0 1-1v-1.3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>`,
+  },
+  coffee: {
+    viewBox: "0 0 24 24",
+    path: `<path d="M17 8h1a4 4 0 1 1 0 8h-1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M3 8h14v9a4 4 0 0 1-4 4H7a4 4 0 0 1-4-4Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M6 2v2M10 2v2M14 2v2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>`,
+  },
+  "coffee-filled": {
+    viewBox: "0 0 24 24",
+    path: `<path d="M17 8h1a4 4 0 1 1 0 8h-1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M3 8h14v9a4 4 0 0 1-4 4H7a4 4 0 0 1-4-4Z" fill="currentColor"/><path d="M3 8h14v9a4 4 0 0 1-4 4H7a4 4 0 0 1-4-4Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M6 2v2M10 2v2M14 2v2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>`,
+  },
+  microphone: {
+    viewBox: "0 0 24 24",
+    path: `<rect x="9" y="3" width="6" height="11" rx="3" stroke="currentColor" stroke-width="1.5"/><path d="M5.5 10.5a6.5 6.5 0 0 0 13 0M12 17v4M8.5 21h7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>`,
+  },
   "circuit-board": {
     viewBox: "0 0 16 16",
     path: `<path d="M12.5 1H3.5C2.121 1 1 2.121 1 3.5V12.5C1 13.879 2.121 15 3.5 15H12.5C13.879 15 15 13.879 15 12.5V3.5C15 2.121 13.879 1 12.5 1ZM6 6.5C6 6.775 5.775 7 5.5 7C5.225 7 5 6.775 5 6.5C5 6.225 5.225 6 5.5 6C5.775 6 6 6.225 6 6.5ZM12.5 14H6V11.5C6 11.225 6.225 11 6.5 11H9.092C9.299 11.581 9.849 12 10.5 12C11.327 12 12 11.327 12 10.5C12 9.673 11.327 9 10.5 9C9.849 9 9.299 9.419 9.092 10H6.5C5.673 10 5 10.673 5 11.5V14H3.5C2.673 14 2 13.327 2 12.5V3.5C2 2.673 2.673 2 3.5 2H5V5.092C4.419 5.299 4 5.849 4 6.5C4 7.327 4.673 8 5.5 8C6.327 8 7 7.327 7 6.5C7 5.849 6.581 5.299 6 5.092V2H12.5C13.327 2 14 2.673 14 3.5V6H10.908C10.701 5.419 10.151 5 9.5 5C8.673 5 8 5.673 8 6.5C8 7.327 8.673 8 9.5 8C10.151 8 10.701 7.581 10.908 7H14V12.5C14 13.327 13.327 14 12.5 14ZM10 10.5C10 10.225 10.225 10 10.5 10C10.775 10 11 10.225 11 10.5C11 10.775 10.775 11 10.5 11C10.225 11 10 10.775 10 10.5ZM10 6.5C10 6.775 9.775 7 9.5 7C9.225 7 9 6.775 9 6.5C9 6.225 9.225 6 9.5 6C9.775 6 10 6.225 10 6.5Z" fill="currentColor"/>`,
+  },
+  globe: {
+    viewBox: "0 0 20 20",
+    path: `<circle cx="10" cy="10" r="7" stroke="currentColor" stroke-width="1.25"/><path d="M3.25 10H16.75M10 3C12 4.875 13 7.2 13 10C13 12.8 12 15.125 10 17M10 3C8 4.875 7 7.2 7 10C7 12.8 8 15.125 10 17" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>`,
   },
   organization: {
     viewBox: "0 0 16 16",
@@ -33,6 +86,42 @@ const icons: Record<string, { path: string; viewBox: string }> = {
   "files-collapse": {
     viewBox: "0 0 16 16",
     path: `<path d="M14 4.27051C14.5999 4.62053 15 5.26009 15 6V11C15 13.21 13.21 15 11 15H6C5.26009 15 4.62053 14.5999 4.27051 14H11C12.65 14 14 12.65 14 11V4.27051Z" fill="currentColor"/><path d="M9.5 7C9.776 7 10 7.224 10 7.5C10 7.776 9.776 8 9.5 8H5.5C5.224 8 5 7.776 5 7.5C5 7.224 5.224 7 5.5 7H9.5Z" fill="currentColor"/><path fill-rule="evenodd" clip-rule="evenodd" d="M11 2C12.103 2 13 2.897 13 4V11C13 12.103 12.103 13 11 13H4C2.897 13 2 12.103 2 11V4C2 2.897 2.897 2 4 2H11ZM4 3C3.449 3 3 3.449 3 4V11C3 11.552 3.449 12 4 12H11C11.551 12 12 11.552 12 11V4C12 3.449 11.551 3 11 3H4Z" fill="currentColor"/>`,
+  },
+  reload: {
+    viewBox: "0 0 24 24",
+    path: `<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"/><path d="M21 3v5h-5" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"/><path d="M3 21v-5h5" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"/>`,
+  },
+  gauge: {
+    viewBox: "0 0 24 24",
+    path: `<path d="M12 14L9 10M12 14L15 10M21 15C21 18.866 17.866 22 14 22H10C6.134 22 3 18.866 3 15V9C3 5.134 6.134 2 10 2H14C17.866 2 21 5.134 21 9V15Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>`,
+  },
+  target: {
+    viewBox: "0 0 20 20",
+    path: `<circle cx="10" cy="10" r="7.5" stroke="currentColor"/><circle cx="10" cy="10" r="4.5" stroke="currentColor"/><circle cx="10" cy="10" r="1.5" fill="currentColor"/>`,
+  },
+  local: {
+    viewBox: "0 0 20 20",
+    path: `<rect x="2.5" y="3.5" width="15" height="10" rx="1" stroke="currentColor"/><path d="M6 16.5H14" stroke="currentColor" stroke-linecap="square"/><path d="M10 13.5V16.5" stroke="currentColor"/>`,
+  },
+  user: {
+    viewBox: "0 0 20 20",
+    path: `<circle cx="10" cy="6.5" r="3" stroke="currentColor" stroke-width="1.25"/><path d="M4 17c.5-3 2.5-4.5 6-4.5s5.5 1.5 6 4.5" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>`,
+  },
+  "wand-sparkles": {
+    viewBox: "0 0 24 24",
+    path: `<path d="m15 4 1 3 3 1-3 1-1 3-1-3-3-1 3-1 1-3ZM19 13l.7 2.3L22 16l-2.3.7L19 19l-.7-2.3L16 16l2.3-.7L19 13ZM4 20 14 10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>`,
+  },
+  send: {
+    viewBox: "0 0 16 16",
+    path: `<path d="M1.5 1.5 14.5 8 1.5 14.5V9L10 8 1.5 7V1.5Z" fill="currentColor"/>`,
+  },
+  reply: {
+    viewBox: "0 0 20 20",
+    path: `<path d="m9 16-5-5 5-5M4 11h10a4 4 0 0 1 4 4v2" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/>`,
+  },
+  smile: {
+    viewBox: "0 0 20 20",
+    path: `<circle cx="10" cy="10" r="7.5" stroke="currentColor" stroke-width="1.25"/><path d="M7 8h.01M13 8h.01M7 12c.9 1.2 2 1.8 3 1.8s2.1-.6 3-1.8" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>`,
   },
 }
 

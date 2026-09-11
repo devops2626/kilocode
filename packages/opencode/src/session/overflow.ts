@@ -1,4 +1,6 @@
 import type { Config } from "@/config/config"
+import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
+import { SessionV1 } from "@opencode-ai/core/v1/session"
 import type { Provider } from "@/provider/provider"
 import { ProviderTransform } from "@/provider/transform"
 import type { MessageV2 } from "./message-v2"
@@ -6,25 +8,29 @@ import { KiloSessionOverflow } from "@/kilocode/session/overflow" // kilocode_ch
 
 const COMPACTION_BUFFER = 20_000
 
-export function usable(input: { cfg: Config.Info; model: Provider.Model }) {
+export function usable(input: { cfg: ConfigV1.Info; model: Provider.Model; outputTokenMax?: number }) {
   const context = input.model.limit.context
   if (context === 0) return 0
 
   const reserved =
-    input.cfg.compaction?.reserved ?? Math.min(COMPACTION_BUFFER, ProviderTransform.maxOutputTokens(input.model))
+    input.cfg.compaction?.reserved ??
+    Math.min(COMPACTION_BUFFER, ProviderTransform.maxOutputTokens(input.model, input.outputTokenMax))
   return input.model.limit.input
     ? Math.max(0, input.model.limit.input - reserved)
-    : Math.max(0, context - ProviderTransform.maxOutputTokens(input.model))
+    : Math.max(0, context - ProviderTransform.maxOutputTokens(input.model, input.outputTokenMax))
 }
 
-export function isOverflow(input: { cfg: Config.Info; tokens: MessageV2.Assistant["tokens"]; model: Provider.Model }) {
+export function isOverflow(input: {
+  cfg: ConfigV1.Info
+  tokens: SessionV1.Assistant["tokens"]
+  model: Provider.Model
+  outputTokenMax?: number
+}) {
   if (input.cfg.compaction?.auto === false) return false
   if (input.model.limit.context === 0) return false
 
-  const count =
-    input.tokens.total || input.tokens.input + input.tokens.output + input.tokens.cache.read + input.tokens.cache.write
-  // kilocode_change start
-  const cap = KiloSessionOverflow.limit({ cfg: input.cfg, model: input.model, usable: usable(input) })
-  return count >= cap
+  const count = KiloSessionOverflow.count(input.tokens) // kilocode_change
+  // kilocode_change start - post-step checks are safety-only; economic thresholds run in preflight
+  return count >= usable(input)
   // kilocode_change end
 }

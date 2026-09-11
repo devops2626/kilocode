@@ -2,14 +2,14 @@
 import path from "path"
 import { type ParseError, parse, printParseErrorCode } from "jsonc-parser"
 import { Schema } from "effect"
-import z from "zod"
 import { ConfigProtection } from "./permission/config-paths"
 import { ConfigMarkdown } from "@/config/markdown"
+import { ConfigParse } from "@/config/parse"
 import { Config } from "@/config/config"
-import { ConfigAgent } from "@/config/agent"
-import { ConfigCommand } from "@/config/command"
-import { JsonError } from "@/config/error"
-import { Instance } from "@/project/instance"
+import { ConfigAgentV1 } from "@opencode-ai/core/v1/config/agent"
+import { ConfigCommandV1 } from "@opencode-ai/core/v1/config/command"
+import { ConfigErrorV1, FrontmatterError } from "@opencode-ai/core/v1/config/error"
+import { Instance } from "@/kilocode/instance"
 import { Filesystem } from "@/util/filesystem"
 
 export namespace ConfigValidation {
@@ -26,7 +26,7 @@ export namespace ConfigValidation {
   async function jsonc(filepath: string): Promise<string> {
     const text = await Filesystem.readText(filepath).catch((err: NodeJS.ErrnoException) => {
       if (err.code === "ENOENT") return undefined
-      throw new JsonError({ path: filepath }, { cause: err })
+      throw new ConfigErrorV1.JsonError({ path: filepath }, { cause: err })
     })
     if (text === undefined) return ""
 
@@ -48,9 +48,16 @@ export namespace ConfigValidation {
       return `\n\n<config_validation>\nERROR: Config file at ${label(filepath)} is not valid JSON(C)\n  ${detail}\n</config_validation>`
     }
 
-    const result = Config.Info.zod.safeParse(data)
-    if (!result.success) {
-      const issues = result.error.issues.map((i) => `  ${i.path.join(".")}: ${i.message}`).join("\n")
+    const issues = (() => {
+      try {
+        ConfigParse.schema(Config.Info, data, filepath)
+        return undefined
+      } catch (err) {
+        if (err instanceof Error) return err.message
+        return String(err)
+      }
+    })()
+    if (issues) {
       return `\n\n<config_validation>\nWARNING: Configuration is invalid at ${label(filepath)}\n${issues}\n</config_validation>`
     }
 
@@ -66,10 +73,16 @@ export namespace ConfigValidation {
 
     let md: Awaited<ReturnType<typeof ConfigMarkdown.parse>>
     try {
-      md = await ConfigMarkdown.parse(filepath)
+      const trusted = path.isAbsolute(filepath) && ConfigProtection.isAbsolute(filepath)
+      const ctx = Instance.current
+      const root = ctx.worktree === "/" ? ctx.directory : ctx.worktree
+      md = await ConfigMarkdown.parse(filepath, {
+        trusted,
+        fileScope: trusted ? undefined : { root, source: filepath },
+      })
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } catch (e: any) {
-      const msg = ConfigMarkdown.FrontmatterError.isInstance(e)
+      const msg = FrontmatterError.isInstance(e)
         ? e.data.message
         : `Failed to parse frontmatter: ${e instanceof Error ? e.message : String(e)}`
       return `\n\n<config_validation>\nERROR: ${label(filepath)}\n  ${msg}\n</config_validation>`
@@ -79,16 +92,13 @@ export namespace ConfigValidation {
       schema === "command" ? { ...md.data, template: md.content.trim() } : { ...md.data, prompt: md.content.trim() }
 
     if (schema === "command") {
-      const issues = validateEffectSchema(ConfigCommand.Info, config)
+      const issues = validateEffectSchema(ConfigCommandV1.Info, config)
       if (issues) {
         return `\n\n<config_validation>\nWARNING: Configuration is invalid at ${label(filepath)}\n${issues}\n</config_validation>`
       }
     } else {
-      const result = ConfigAgent.Info.zod.safeParse(config)
-      if (!result.success) {
-        const issues = result.error.issues
-          .map((i: z.core.$ZodIssue) => `  ${i.path.join(".")}: ${i.message}`)
-          .join("\n")
+      const issues = validateEffectSchema(ConfigAgentV1.Info, config)
+      if (issues) {
         return `\n\n<config_validation>\nWARNING: Configuration is invalid at ${label(filepath)}\n${issues}\n</config_validation>`
       }
     }

@@ -10,7 +10,7 @@ If you already use the sidebar chat and want to start running multiple agents in
 ## Sidebar vs. Agent Manager
 
 - **Sidebar** — one agent on your current branch. Best for small, interactive tasks where you want tight feedback.
-- **Agent Manager** — multiple agents, each in its own git worktree (its own branch checked out on disk). Best for long-running work, trying several approaches, or keeping side work isolated from your main branch.
+- **Agent Manager** — multiple top-level sessions. Choose a git worktree when each agent needs its own branch and checkout, or use Local sessions when conversations should share one workspace.
 - **Multiple sessions inside one worktree** (`Cmd+T` / `Ctrl+T`) — same branch, separate conversations. Useful for planner + implementer splits or read-only investigations alongside the main agent.
 
 Rule of thumb: if you would stash or switch branches to do the work, create a worktree instead.
@@ -18,6 +18,20 @@ Rule of thumb: if you would stash or switch branches to do the work, create a wo
 {% callout type="info" %}
 All Agent Manager sessions use the extension's embedded runtime. What each worktree isolates is the filesystem and git state: the branch, the directory, and the terminal. Providers, BYOK keys, custom providers, models, and extension settings are shared with the sidebar.
 {% /callout %}
+
+## Task subagents vs. Agent Manager sessions
+
+Use the smallest orchestration layer that matches the work:
+
+| Need | Use |
+|---|---|
+| Get a focused result before the current agent continues | A foreground `task` subagent |
+| Let independent research or implementation run while the current agent continues | A background `task` subagent with `background: true` |
+| Give an agent an isolated branch, checkout, terminal, and diff | An Agent Manager `worktree` session |
+| Start another conversation on the same branch | An Agent Manager Local session or `Cmd+T` / `Ctrl+T` |
+| Share material findings among one session and its task descendants | Kilo Swarm with `board_post` and `board_read` |
+
+Task children are non-interactive delegates. They cannot ask the user directly and do not create worktrees. Agent Manager sessions are top-level sessions with their own prompt queues. Separate Agent Manager sessions do not share a Kilo Swarm board automatically, even when they use the same worktree.
 
 {% callout type="warning" %}
 Git worktrees are lightweight compared with cloning the repository several times, but they are not free. Each worktree has its own checked-out files, and any dependencies, build artifacts, caches, local databases, or generated files created inside that directory count separately on disk.
@@ -35,10 +49,10 @@ Parallel work pays off when sessions are **independent** — neither one's outpu
 
 Every productive worktree session follows the same rhythm:
 
-1. **Create a worktree** (`Cmd+N` / `Ctrl+N`) and describe the task.
+1. **Open a new worktree dialog** (`Cmd+N` / `Ctrl+N`), then describe the task.
 2. **Let the agent run.** Switch to another worktree, another session, or step away.
 3. **Verify manually.** Before you trust "all tests pass", run the app with the run script (`Cmd+E` / `Ctrl+E`) or open the worktree's terminal (`Cmd+/` / `Ctrl+/`) and run the tests yourself.
-4. **Review the diff** (`Cmd+D` / `Ctrl+D`). Drop inline comments, then **Send to chat** to feed them back to the agent.
+4. **Review the diff** (`Cmd+D` / `Ctrl+D`). Add inline comments, then send all collected comments to chat or the active Agent Manager terminal with **Send all to chat**. Use `Cmd+Enter` / `Ctrl+Enter` as a shortcut.
 5. **Iterate.** Re-run, re-review. Repeat until the diff is ready — not until the agent says it is done.
 6. **Ship it.** See [Merging worktree and parent branch](#merging-worktree-and-parent-branch).
 
@@ -48,7 +62,7 @@ The single biggest lever on this loop is **keeping each worktree's scope small**
 
 ### 1. Side quest
 
-Something unrelated came up while you are mid-task. Create a new worktree for it (`Cmd+N`), let the agent work, review when it is done. Your main work is unaffected.
+Something unrelated came up while you are mid-task. Open a new worktree dialog for it (`Cmd+N`), let the agent work, review when it is done. Your main work is unaffected.
 
 ### 2. Build a skeleton, then split the work
 
@@ -64,7 +78,7 @@ This mirrors how a human team works: agree the API contract first, then split ba
 
 For genuinely hard tasks where you do not know which approach will work:
 
-1. Open the advanced new-worktree dialog (`Cmd+Shift+N` / `Ctrl+Shift+N`) and pick 2–4 versions.
+1. Open the new-worktree dialog (`Cmd+N` / `Ctrl+N`) and pick 2–4 versions.
 2. Optionally assign a different model to each.
 3. Review the diffs side by side, pick the winner, apply it, discard the rest.
 
@@ -76,7 +90,7 @@ A related pattern: use the sidebar as an investigation surface. Start two or thr
 
 ### 5. A worktree per bug
 
-For a day of small fixes: one worktree per bug (`Cmd+N`), one branch per fix, merge each quickly so none drift. Close the worktree when the fix lands.
+For a day of small fixes: one worktree per bug. Use `Cmd+N` to configure each worktree or `Cmd+Shift+N` to create one immediately from the configured default base branch, merge each quickly so none drift. Close the worktree when the fix lands.
 
 ### 6. Multiple sessions on one branch
 
@@ -152,12 +166,14 @@ Put the remaining project-specific setup in `.kilo/setup-script`, for example co
 Layer review in before asking a teammate:
 
 - **Diff panel** (`Cmd+D`) — live diff against the parent branch. Drag filenames into the chat input for `@file` mentions. Inline-comment the lines you want revisited, then **Send to chat** to iterate.
-- **`/local-review-uncommitted`** — slash command, AI review of staged and unstaged changes in the worktree. Good as a last pass before committing.
-- **`/local-review`** — slash command, AI review of the whole branch vs. its base.
+- **`/review`** — slash command, AI review of staged, unstaged, and untracked changes in the worktree when run without arguments. Good as a last pass before committing.
+- **`/review uncommitted [guidance]`** — explicitly review uncommitted changes, optionally focusing the review with guidance.
+- **`/review branch [base] [guidance]`** — review the whole branch vs. its detected or specified base, with optional guidance.
+- **`/review <commit-hash>` or `/review <PR URL or number>`** — review a specific commit or pull request.
 - **`kilo review` in CI** — automated PR review. See [Code Reviews](/docs/automate/code-reviews/overview) for the setup.
-- **Human review** — push the branch from the session terminal and `gh pr create`. The PR badge appears on the worktree and stays in sync with CI and reviews.
+- **Human review** — push the branch from the session terminal and `gh pr create`. The PR badge appears on the worktree and stays in sync with CI and reviews. Review, comment on, and merge the pull request from the internal PR panel; see [Reviewing a pull request](/docs/automate/agent-manager#reviewing-a-pull-request).
 
-A typical sequence: self-review in the diff panel → `/local-review-uncommitted` → push → CI review → teammate review.
+A typical sequence: self-review in the diff panel → `/review` → push → CI review → teammate review.
 
 ## Merging worktree and parent branch
 
@@ -223,8 +239,9 @@ Merge the most foundational one first. Then, in each remaining worktree, ask the
 | Situation | Where |
 |---|---|
 | Small, interactive task | Sidebar |
-| Long task, want to do something else meanwhile | New worktree (`Cmd+N`) |
-| Two or three approaches, pick the winner | Multi-version (`Cmd+Shift+N`) |
+| Long task, want to do something else meanwhile | Configure a new worktree (`Cmd+N`) |
+| Quick task on the default base branch | Create a new worktree (`Cmd+Shift+N`) |
+| Two or three approaches, pick the winner | Configure multi-version worktrees (`Cmd+N`) |
 | Sidebar task outgrew the sidebar | Continue in Worktree |
 | Separate conversation on the same branch | New tab (`Cmd+T`) |
 | Long conversation, want a fresh context on same branch | New tab, summarize |

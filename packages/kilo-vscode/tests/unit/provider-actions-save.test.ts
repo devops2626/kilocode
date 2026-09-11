@@ -1,5 +1,11 @@
 import { describe, expect, it } from "bun:test"
-import { connectProvider, disconnectProvider, fetchProviderData, saveCustomProvider } from "../../src/provider-actions"
+import {
+  connectProvider,
+  disconnectProvider,
+  fetchProviderData,
+  resolveStoredKey,
+  saveCustomProvider,
+} from "../../src/provider-actions"
 
 type ExistingGlobal = { disabled_providers?: string[]; provider?: Record<string, unknown> }
 
@@ -47,6 +53,9 @@ function createCtx(existing: ExistingGlobal = { disabled_providers: [] }, merged
           },
         }),
         auth: async () => ({ data: {} }),
+      },
+      kilo: {
+        authStatus: async () => ({ data: { authenticated: false } }),
       },
       global: {
         config: {
@@ -197,6 +206,27 @@ describe("saveCustomProvider", () => {
     expect(calls.set).toEqual([{ providerID: "myprovider", auth: { type: "api", key: "sk-test" } }])
   })
 
+  it("preserves opaque existing variant options through the save boundary", async () => {
+    const variant = {
+      thinking: { type: "adaptive", display: "summarized" },
+      reasoningEffort: "custom",
+      reasoningSummary: "auto",
+      include: ["reasoning.encrypted_content"],
+      customOption: { enabled: true },
+    }
+    const saved = {
+      ...createSavedProvider(),
+      models: { "model-1": { name: "Model One", reasoning: true, variants: { high: variant } } },
+    }
+    const existing = { disabled_providers: [], provider: { myprovider: saved } }
+    const { ctx, calls, setCachedConfig } = createCtx(existing)
+
+    await saveCustomProvider(ctx, "req", "myprovider", saved, undefined, false, null, setCachedConfig)
+
+    const provider = (calls.config[0]?.config.provider as Record<string, typeof saved>).myprovider
+    expect(provider.models["model-1"].variants.high).toEqual(variant)
+  })
+
   // Regression tests for https://github.com/Kilo-Org/kilocode/issues/9186
   //
   // The CLI's config.update endpoint deep-merges its payload with the existing
@@ -237,7 +267,7 @@ describe("saveCustomProvider", () => {
     expect(payload.myprovider.models["model-gone"]).toBeNull()
   })
 
-  it("emits null sentinels for variants removed from a model that still exists", async () => {
+  it("emits null sentinels when reasoning and variants are removed from a model", async () => {
     const existing = {
       disabled_providers: [],
       provider: {
@@ -264,11 +294,7 @@ describe("saveCustomProvider", () => {
       name: "My Provider",
       options: { baseURL: "https://example.com/v1" },
       models: {
-        "model-1": {
-          name: "Model One",
-          reasoning: true,
-          variants: { high: { reasoningEffort: "high" } },
-        },
+        "model-1": { name: "Model One" },
       },
     }
     await saveCustomProvider(ctx, "req", "myprovider", next, undefined, false, null, setCachedConfig)
@@ -277,11 +303,11 @@ describe("saveCustomProvider", () => {
     const model = (
       calls.config[0].config.provider as Record<
         string,
-        { models: Record<string, { variants?: Record<string, unknown> }> }
+        { models: Record<string, { reasoning?: boolean | null; variants?: Record<string, unknown> }> }
       >
     ).myprovider.models["model-1"]
-    expect(model.variants).toBeDefined()
-    expect(model.variants?.high).toBeDefined()
+    expect(model.reasoning).toBeNull()
+    expect(model.variants?.high).toBeNull()
     expect(model.variants?.low).toBeNull()
   })
 
@@ -412,6 +438,138 @@ describe("disconnectProvider", () => {
 })
 
 describe("fetchProviderData", () => {
+  for (const item of [
+    { name: "uses the allowed organization API default", recommended: "org/default", expected: "org/default" },
+    { name: "uses the first allowed model when no default exists", recommended: undefined, expected: "org/first" },
+    { name: "uses the first allowed model when the default is empty", recommended: "", expected: "org/first" },
+    {
+      name: "ignores a default outside the organization catalog",
+      recommended: "kilo-auto/free",
+      expected: "org/first",
+    },
+    { name: "ignores inherited catalog properties", recommended: "toString", expected: "org/first" },
+    {
+      name: "does not invent a default for an empty catalog",
+      empty: true,
+      recommended: "org/default",
+      expected: undefined,
+    },
+    {
+      name: "does not retain a default without a Kilo provider",
+      missing: true,
+      recommended: "org/default",
+      expected: undefined,
+    },
+  ]) {
+    it(item.name, async () => {
+      let calls = 0
+      const external = {
+        id: "anthropic",
+        name: "Anthropic",
+        models: { claude: { id: "claude" } },
+        metadata: { priority: 1 },
+      }
+      const client = {
+        provider: {
+          list: async () => ({
+            data: {
+              all: [
+                ...(item.missing
+                  ? []
+                  : [
+                      {
+                        id: "kilo",
+                        name: "Kilo Gateway",
+                        models: item.empty
+                          ? {}
+                          : { "org/first": { id: "org/first" }, "org/default": { id: "org/default" } },
+                      },
+                    ]),
+                { ...external, key: "sk-test" },
+              ],
+              connected: item.missing ? ["anthropic"] : ["kilo", "anthropic"],
+              default: { ...(item.recommended === undefined ? {} : { kilo: item.recommended }), anthropic: "claude" },
+            },
+          }),
+          auth: async () => ({ data: {} }),
+        },
+        kilo: {
+          authStatus: async () => ({ data: { authenticated: true, type: "oauth", organizationId: "org" } }),
+        },
+        config: {
+          providers: async () => {
+            calls++
+            return { data: { default: { kilo: "org/first", anthropic: "unrelated" } } }
+          },
+        },
+      } as unknown as Parameters<typeof fetchProviderData>[0]
+
+      const result = await fetchProviderData(client, "/workspace")
+      expect(result.response.default.kilo).toBe(item.expected)
+      expect(result.response.default.anthropic).toBe("claude")
+      expect(result.response.all.find((provider) => provider.id === "anthropic")).toEqual(external)
+      expect(result.response.connected).toEqual(item.missing ? ["anthropic"] : ["kilo", "anthropic"])
+      expect(result.authStates).toEqual({ kilo: "oauth", anthropic: "api" })
+      expect(result.organizationId).toBe("org")
+      expect(result.ready).toBe(true)
+      expect(calls).toBe(0)
+    })
+  }
+
+  it.each([false, true])("removes unverified Kilo data without auth context (failure: %s)", async (fail) => {
+    const client = {
+      provider: {
+        list: async () => ({
+          data: {
+            all: [
+              { id: "kilo", models: { "kilo-auto/free": {} } },
+              { id: "external", models: { model: {} } },
+            ],
+            connected: ["kilo", "external"],
+            default: { kilo: "kilo-auto/free", external: "model" },
+          },
+        }),
+        auth: async () => ({ data: {} }),
+      },
+      kilo: {
+        authStatus: async () => {
+          if (fail) throw new Error("Context unavailable")
+          return { data: undefined }
+        },
+      },
+    } as unknown as Parameters<typeof fetchProviderData>[0]
+
+    const result = await fetchProviderData(client, "/workspace")
+    expect(result.ready).toBe(false)
+    expect(result.organizationId).toBeUndefined()
+    expect(result.response.all.map((provider) => provider.id)).toEqual(["external"])
+    expect(result.response.connected).toEqual(["external"])
+    expect(result.response.default).toEqual({ external: "model" })
+  })
+
+  it("retains Personal defaults without fetching organization recommendations", async () => {
+    let calls = 0
+    const client = {
+      provider: {
+        list: async () => ({ data: { all: [], connected: [], default: { kilo: "kilo-auto/free" } } }),
+        auth: async () => ({ data: {} }),
+      },
+      kilo: { authStatus: async () => ({ data: { authenticated: true, type: "oauth" } }) },
+      config: {
+        providers: async () => {
+          calls++
+          return { data: { default: { kilo: "unexpected" } } }
+        },
+      },
+    } as unknown as Parameters<typeof fetchProviderData>[0]
+
+    const result = await fetchProviderData(client, "/workspace")
+    expect(result.ready).toBe(true)
+    expect(result.organizationId).toBeNull()
+    expect(calls).toBe(0)
+    expect(result.response.default).toEqual({ kilo: "kilo-auto/free" })
+  })
+
   it("derives api auth state and strips keys from provider payloads", async () => {
     const client = {
       provider: {
@@ -433,6 +591,9 @@ describe("fetchProviderData", () => {
         }),
         auth: async () => ({ data: {} }),
       },
+      kilo: {
+        authStatus: async () => ({ data: { authenticated: false } }),
+      },
     } as unknown as Parameters<typeof fetchProviderData>[0]
 
     const result = await fetchProviderData(client, "/tmp")
@@ -440,5 +601,117 @@ describe("fetchProviderData", () => {
 
     expect(result.authStates).toEqual({ "groq-test": "api" })
     expect("key" in item).toBe(false)
+  })
+
+  it("uses local Kilo auth status instead of profile availability", async () => {
+    const client = {
+      provider: {
+        list: async () => ({
+          data: {
+            all: [{ id: "kilo", name: "Kilo Gateway", source: "custom", env: [], models: {} }],
+            connected: ["kilo"],
+            default: { kilo: "kilo-auto/frontier" },
+          },
+        }),
+        auth: async () => ({ data: {} }),
+      },
+      kilo: {
+        authStatus: async () => ({ data: { authenticated: true, type: "oauth" } }),
+      },
+    } as unknown as Parameters<typeof fetchProviderData>[0]
+
+    const result = await fetchProviderData(client, "/tmp")
+
+    expect(result.authStates).toEqual({ kilo: "oauth" })
+  })
+
+  it("does not infer Kilo speech access without stored Gateway auth", async () => {
+    const client = {
+      provider: {
+        list: async () => ({
+          data: {
+            all: [{ id: "kilo", name: "Kilo Gateway", source: "config", key: "configured", env: [], models: {} }],
+            connected: ["kilo"],
+            default: { kilo: "kilo-auto/frontier" },
+          },
+        }),
+        auth: async () => ({ data: {} }),
+      },
+      kilo: {
+        authStatus: async () => ({ data: { authenticated: false } }),
+      },
+    } as unknown as Parameters<typeof fetchProviderData>[0]
+
+    const result = await fetchProviderData(client, "/tmp")
+
+    expect(result.authStates).toEqual({})
+  })
+
+  it("retains stripped keys for providers with a configured baseURL", async () => {
+    const client = {
+      provider: {
+        list: async () => ({
+          data: {
+            all: [
+              {
+                id: "myprovider",
+                name: "My Provider",
+                source: "config",
+                key: "sk-stored",
+                env: [],
+                options: { baseURL: "https://example.com/v1" },
+                models: {},
+              },
+              {
+                id: "no-url",
+                name: "No URL",
+                source: "config",
+                key: "sk-other",
+                env: [],
+                models: {},
+              },
+            ],
+            connected: [],
+            default: {},
+          },
+        }),
+        auth: async () => ({ data: {} }),
+      },
+      kilo: {
+        authStatus: async () => ({ data: { authenticated: false } }),
+      },
+    } as unknown as Parameters<typeof fetchProviderData>[0]
+
+    const result = await fetchProviderData(client, "/tmp")
+
+    expect(result.storedKeys).toEqual({
+      myprovider: { key: "sk-stored", baseURL: "https://example.com/v1" },
+    })
+    expect(result.response.all.every((item) => !("key" in (item as Record<string, unknown>)))).toBe(true)
+  })
+})
+
+describe("resolveStoredKey", () => {
+  const storedKeys = {
+    myprovider: { key: "sk-stored", baseURL: "https://example.com/v1" },
+  }
+
+  it("returns the stored key when the fetch URL matches the configured baseURL", () => {
+    expect(resolveStoredKey(storedKeys, "myprovider", "https://example.com/v1")).toBe("sk-stored")
+  })
+
+  it("tolerates trailing-slash differences", () => {
+    expect(resolveStoredKey(storedKeys, "myprovider", "https://example.com/v1/")).toBe("sk-stored")
+  })
+
+  it("refuses to apply the stored key to a different host or path", () => {
+    expect(resolveStoredKey(storedKeys, "myprovider", "https://evil.example.net/v1")).toBeUndefined()
+    expect(resolveStoredKey(storedKeys, "myprovider", "https://example.com/v2")).toBeUndefined()
+  })
+
+  it("returns undefined for unknown or missing provider ids", () => {
+    expect(resolveStoredKey(storedKeys, "other", "https://example.com/v1")).toBeUndefined()
+    expect(resolveStoredKey(storedKeys, undefined, "https://example.com/v1")).toBeUndefined()
+    expect(resolveStoredKey(storedKeys, "", "https://example.com/v1")).toBeUndefined()
   })
 })

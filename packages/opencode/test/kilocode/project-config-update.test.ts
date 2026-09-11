@@ -1,23 +1,27 @@
 // kilocode_change - new file
 
+import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { expect, test } from "bun:test"
 import fs from "fs/promises"
 import path from "path"
 import { Effect, Layer, Option } from "effect"
 import { NodeFileSystem, NodePath } from "@effect/platform-node"
-import { AppFileSystem } from "@opencode-ai/core/filesystem"
+import { FSUtil } from "@opencode-ai/core/fs-util"
 import { EffectFlock } from "@opencode-ai/core/util/effect-flock"
 import { Config } from "../../src/config/config"
 import { Auth } from "../../src/auth"
 import { Account } from "../../src/account/account"
 import { Env } from "../../src/env"
+import { Git } from "../../src/git"
 import { Npm } from "@opencode-ai/core/npm"
-import { WithInstance } from "../../src/project/with-instance"
+import { provideTestInstance } from "../fixture/fixture"
 import { Filesystem } from "../../src/util/filesystem"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
+import { HttpClient } from "effect/unstable/http"
 import { tmpdir } from "../fixture/fixture"
+import { LayerNodePlatform } from "@opencode-ai/core/effect/app-node-platform"
 
-const infra = CrossSpawnSpawner.defaultLayer.pipe(
+const infra = AppNodeBuilder.build(CrossSpawnSpawner.node).pipe(
   Layer.provideMerge(Layer.mergeAll(NodeFileSystem.layer, NodePath.layer)),
 )
 
@@ -33,18 +37,19 @@ const emptyAuth = Layer.mock(Auth.Service)({
 const noopNpm = Layer.mock(Npm.Service)({
   install: () => Effect.void,
   add: () => Effect.die("not implemented"),
-  which: () => Effect.succeed(Option.none()),
+  which: () => Effect.succeed(undefined),
 })
 
-const layer = Config.layer.pipe(
-  Layer.provide(EffectFlock.defaultLayer),
-  Layer.provide(AppFileSystem.defaultLayer),
-  Layer.provide(Env.defaultLayer),
-  Layer.provide(emptyAuth),
-  Layer.provide(emptyAccount),
-  Layer.provideMerge(infra),
-  Layer.provide(noopNpm),
+const unexpectedHttp = HttpClient.make((request) =>
+  Effect.die(`unexpected http request: ${request.method} ${request.url}`),
 )
+
+const layer = AppNodeBuilder.build(Config.node, [
+  [Auth.node, emptyAuth],
+  [Account.node, emptyAccount],
+  [Npm.node, noopNpm],
+  [LayerNodePlatform.httpClient, Layer.succeed(HttpClient.HttpClient, unexpectedHttp)],
+]).pipe(Layer.provideMerge(infra))
 
 const load = () => Effect.runPromise(Config.Service.use((svc) => svc.get()).pipe(Effect.scoped, Effect.provide(layer)))
 const save = (config: Config.Info) =>
@@ -54,14 +59,14 @@ async function writeConfig(dir: string, config: unknown) {
   await Filesystem.write(path.join(dir, "kilo.json"), JSON.stringify(config, null, 2))
 }
 
-test("project config update creates .kilo/kilo.json and reloads it", async () => {
+test("project config update creates .kilo/kilo.jsonc and reloads it", async () => {
   await using tmp = await tmpdir()
-  await WithInstance.provide({
+  await provideTestInstance({
     directory: tmp.path,
     fn: async () => {
       await save({ model: "updated/model" } as any)
 
-      const written = await Filesystem.readJson<{ model: string }>(path.join(tmp.path, ".kilo", "kilo.json"))
+      const written = await Filesystem.readJson<{ model: string }>(path.join(tmp.path, ".kilo", "kilo.jsonc"))
       expect(written.model).toBe("updated/model")
 
       const loaded = await load()
@@ -72,12 +77,12 @@ test("project config update creates .kilo/kilo.json and reloads it", async () =>
 
 test("project config update skips empty delete-only writes when no config exists", async () => {
   await using tmp = await tmpdir()
-  await WithInstance.provide({
+  await provideTestInstance({
     directory: tmp.path,
     fn: async () => {
       await save({ provider: { missing: null } } as any)
 
-      await expect(fs.access(path.join(tmp.path, ".kilo", "kilo.json"))).rejects.toThrow()
+      await expect(fs.access(path.join(tmp.path, ".kilo", "kilo.jsonc"))).rejects.toThrow()
     },
   })
 })
@@ -86,7 +91,7 @@ test("project config update prefers existing root kilo.json", async () => {
   await using tmp = await tmpdir()
   await writeConfig(tmp.path, { username: "alice" })
 
-  await WithInstance.provide({
+  await provideTestInstance({
     directory: tmp.path,
     fn: async () => {
       await save({ model: "updated/model" } as any)
@@ -105,7 +110,7 @@ test("project config update patches ancestor .kilo/kilo.json from nested directo
   await fs.mkdir(path.join(tmp.path, ".kilo"), { recursive: true })
   await writeConfig(path.join(tmp.path, ".kilo"), { username: "alice" })
 
-  await WithInstance.provide({
+  await provideTestInstance({
     directory: child,
     fn: async () => {
       await save({ model: "updated/model" } as any)

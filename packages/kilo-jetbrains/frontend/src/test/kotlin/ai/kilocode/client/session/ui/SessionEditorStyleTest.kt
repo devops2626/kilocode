@@ -1,40 +1,79 @@
 package ai.kilocode.client.session.ui
 
 import ai.kilocode.client.session.ui.style.SessionEditorStyle
+import ai.kilocode.client.session.ui.style.SessionUiStyle
 import ai.kilocode.client.ui.UiStyle
+import com.intellij.ide.ui.UISettings
+import com.intellij.ide.ui.UISettingsUtils
+import com.intellij.openapi.editor.EditorFactory
+import com.intellij.openapi.editor.ex.EditorEx
 import com.intellij.openapi.editor.colors.EditorColorsManager
 import com.intellij.testFramework.fixtures.BasePlatformTestCase
 import java.awt.Font
+import kotlin.math.roundToInt
 
 @Suppress("UnstableApiUsage")
 class SessionEditorStyleTest : BasePlatformTestCase() {
 
-    fun `test transcript font uses editor settings`() {
+    fun `test transcript font uses ui family and editor size`() {
         val scheme = EditorColorsManager.getInstance().globalScheme
         val style = SessionEditorStyle.current()
         val font = style.transcriptFont
+        val size = UISettingsUtils.getInstance()
+            .scaleFontSize(scheme.editorFontSize.toFloat())
+            .roundToInt()
 
-        assertEquals(scheme.editorFontName, font.name)
-        assertEquals(scheme.editorFontSize, font.size)
+        assertEquals(UiStyle.Fonts.regular().name, font.name)
+        assertEquals(size, font.size)
         assertEquals(scheme.defaultForeground, style.editorForeground)
         assertEquals(scheme.defaultBackground, style.editorBackground)
         assertEquals(Font.PLAIN, font.style)
     }
 
-    fun `test bold editor font uses editor family and size`() {
+    fun `test current scales editor size with ide scale`() {
+        val settings = UISettings.getInstance()
+        val original = settings.ideScale
+        try {
+            val base = EditorColorsManager.getInstance().globalScheme.editorFontSize
+            settings.ideScale = 1.5f
+            settings.fireUISettingsChanged()
+
+            val style = SessionEditorStyle.current()
+
+            assertTrue(
+                "transcript should grow with ide scale (base=$base, got=${style.transcriptFont.size})",
+                style.transcriptFont.size > base,
+            )
+            assertEquals(style.editorSize, style.transcriptFont.size)
+        } finally {
+            settings.ideScale = original
+            settings.fireUISettingsChanged()
+        }
+    }
+
+    fun `test editor font uses editor family and size`() {
+        val style = SessionEditorStyle.current()
+        val font = style.editorFont
+
+        assertEquals(style.editorFamily, font.name)
+        assertEquals(style.editorSize, font.size)
+        assertEquals(Font.PLAIN, font.style)
+    }
+
+    fun `test bold transcript font uses ui family and editor size`() {
         val style = SessionEditorStyle.current()
         val font = style.boldEditorFont
 
-        assertEquals(style.editorFamily, font.name)
+        assertEquals(UiStyle.Fonts.regular().name, font.name)
         assertEquals(style.editorSize, font.size)
         assertTrue(font.isBold)
     }
 
-    fun `test small editor font uses editor family with smaller editor-derived size`() {
+    fun `test small transcript font uses ui family with smaller editor-derived size`() {
         val style = SessionEditorStyle.current()
         val font = style.smallEditorFont
 
-        assertEquals(style.editorFamily, font.name)
+        assertEquals(UiStyle.Fonts.small().name, font.name)
         assertTrue(font.size < style.editorSize)
     }
 
@@ -43,9 +82,10 @@ class SessionEditorStyleTest : BasePlatformTestCase() {
 
         assertEquals("Courier New", style.editorFamily)
         assertEquals(22, style.editorSize)
-        assertEquals("Courier New", style.transcriptFont.name)
+        assertEquals("Courier New", style.editorFont.name)
+        assertEquals(UiStyle.Fonts.regular().name, style.transcriptFont.name)
         assertEquals(22, style.transcriptFont.size)
-        assertEquals("Courier New", style.boldEditorFont.name)
+        assertEquals(UiStyle.Fonts.regular().name, style.boldEditorFont.name)
         assertEquals(22, style.boldEditorFont.size)
         assertTrue(style.boldEditorFont.isBold)
         assertTrue(style.smallEditorFont.size < style.editorSize)
@@ -58,9 +98,9 @@ class SessionEditorStyleTest : BasePlatformTestCase() {
         assertEquals(UiStyle.Fonts.header(), style.headerFont)
     }
 
-    fun `test hintFont equals UiStyle Fonts hint`() {
+    fun `test secondary text font equals UiStyle Fonts regular`() {
         val style = SessionEditorStyle.create(family = "Courier New", size = 22)
-        assertEquals(UiStyle.Fonts.hint(), style.hintFont)
+        assertEquals(UiStyle.Fonts.regular(), SessionUiStyle.Text.Secondary.font(style))
     }
 
     fun `test regularFont equals UiStyle Fonts regular`() {
@@ -83,9 +123,38 @@ class SessionEditorStyleTest : BasePlatformTestCase() {
         val style = SessionEditorStyle.create(family = "Courier New", size = 22)
 
         assertFalse("headerFont should not use editor font family", style.headerFont.name == "Courier New")
-        assertFalse("hintFont should not use editor font family", style.hintFont.name == "Courier New")
+        assertFalse("secondary text font should not use editor font family", SessionUiStyle.Text.Secondary.font(style).name == "Courier New")
         assertFalse("regularFont should not use editor font family", style.regularFont.name == "Courier New")
         assertFalse("boldFont should not use editor font family", style.boldFont.name == "Courier New")
         assertFalse("smallFont should not use editor font family", style.smallFont.name == "Courier New")
+    }
+
+    fun `test transcript editor styling ignores disposed editor`() {
+        val factory = EditorFactory.getInstance()
+        val editor = factory.createEditor(factory.createDocument(""), project) as EditorEx
+
+        factory.releaseEditor(editor)
+
+        SessionEditorStyle.current().applyTranscriptToEditor(editor)
+    }
+
+    fun `test applyToEditor skips redundant scheme reinit for the same snapshot`() {
+        val factory = EditorFactory.getInstance()
+        val editor = factory.createEditor(factory.createDocument("a\nb\nc\n"), project) as EditorEx
+        try {
+            val style = SessionEditorStyle.current()
+            style.applyToEditor(editor)
+            // setColorsScheme wraps the scheme in a fresh delegate on every call, so an unchanged
+            // colorsScheme identity proves the redundant second apply was skipped (no reinit).
+            val applied = editor.colorsScheme
+            style.applyToEditor(editor)
+            assertSame(applied, editor.colorsScheme)
+
+            // A different snapshot instance must still re-apply and swap the delegate.
+            SessionEditorStyle.current().applyToEditor(editor)
+            assertNotSame(applied, editor.colorsScheme)
+        } finally {
+            factory.releaseEditor(editor)
+        }
     }
 }

@@ -53,15 +53,25 @@ function reconstruct(patch: string) {
 
 type DiffText = { before: string; after: string; patch: string }
 
+function name(diff: ReviewDiff) {
+  return diff.file ?? ""
+}
+
+function patchFor(file: string, value: string) {
+  if (!value.trimStart().startsWith("@@")) return value
+  if (!file) return value
+  const body = value.endsWith("\n") ? value : `${value}\n`
+  return `--- a/${file}\n+++ b/${file}\n${body}`
+}
+
 function contents(diff: ReviewDiff): DiffText {
   if (typeof diff.patch === "string") {
     return { ...reconstruct(diff.patch), patch: diff.patch }
   }
   const before = "before" in diff && typeof diff.before === "string" ? diff.before : ""
   const after = "after" in diff && typeof diff.after === "string" ? diff.after : ""
-  const patch = formatPatch(
-    structuredPatch(diff.file, diff.file, before, after, "", "", { context: Number.MAX_SAFE_INTEGER }),
-  )
+  const file = name(diff)
+  const patch = formatPatch(structuredPatch(file, file, before, after, "", "", { context: Number.MAX_SAFE_INTEGER }))
   return { before, after, patch }
 }
 
@@ -69,9 +79,9 @@ function fileDiffFor(diff: ReviewDiff, view: DiffText): FileDiffMetadata {
   const hit = cache.get(view.patch)
   if (hit) return hit
   const fromPatch = typeof diff.patch === "string" ? processFile(diff.patch, { cacheKey: diff.patch }) : undefined
+  const file = name(diff)
   const value =
-    fromPatch ??
-    parseDiffFromFile({ name: diff.file, contents: view.before }, { name: diff.file, contents: view.after })
+    fromPatch ?? parseDiffFromFile({ name: file, contents: view.before }, { name: file, contents: view.after })
   cache.set(view.patch, value)
   return value
 }
@@ -79,7 +89,7 @@ function fileDiffFor(diff: ReviewDiff, view: DiffText): FileDiffMetadata {
 export function normalize(diff: ReviewDiff): ViewDiff {
   const view = contents(diff)
   return {
-    file: diff.file,
+    file: name(diff),
     patch: view.patch,
     before: view.before,
     after: view.after,
@@ -87,6 +97,28 @@ export function normalize(diff: ReviewDiff): ViewDiff {
     deletions: diff.deletions,
     status: diff.status,
     fileDiff: fileDiffFor(diff, view),
+  }
+}
+
+export function normalizeHunk(file: string, patch: string) {
+  if (!file || !patch.trim()) return
+  const value = patchFor(file, patch)
+  let fileDiff: FileDiffMetadata | undefined
+  try {
+    fileDiff = processFile(value, { cacheKey: value })
+  } catch {
+    return
+  }
+  if (!fileDiff?.hunks.length) return
+  return {
+    file,
+    patch: value,
+    before: fileDiff.deletionLines.join(""),
+    after: fileDiff.additionLines.join(""),
+    additions: fileDiff.additionLines.length,
+    deletions: fileDiff.deletionLines.length,
+    status: "modified" as const,
+    fileDiff,
   }
 }
 

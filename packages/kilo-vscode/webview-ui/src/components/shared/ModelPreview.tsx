@@ -5,11 +5,20 @@ import { Markdown } from "@kilocode/kilo-ui/markdown"
 import { Icon } from "@kilocode/kilo-ui/icon"
 import { Tooltip } from "@kilocode/kilo-ui/tooltip"
 import { useLanguage } from "../../context/language"
-import { sanitizeName } from "./model-selector-utils"
-import { avgPrice, fmtCachedPrice, fmtPrice } from "./model-preview-utils"
+import {
+  autoChoices,
+  autoSummary,
+  freeDataLabel,
+  hasByok,
+  isAuto,
+  isDataCollectedModel,
+  sanitizeName,
+} from "./model-selector-utils"
+import { avgPrice, fmtAttemptCost, fmtCachedPrice, fmtPrice, fmtTerminalBenchScore } from "./model-preview-utils"
 
 interface Props {
   model: EnrichedModel | null
+  models?: readonly EnrichedModel[]
 }
 
 function fmtContext(n: number): string {
@@ -41,11 +50,18 @@ export const ModelPreview: Component<Props> = (props) => {
       <Show when={m()}>
         {(model) => {
           const cost = () => model().cost
+          const hasPricing = () => cost() && (cost()!.input > 0 || cost()!.output > 0)
+          const bench = () => model().terminalBench
           const cachedText = () => {
-            if (!cost()) return ""
+            if (!cost() || !hasPricing()) return ""
             return fmtCachedPrice(cost()!) ?? language.t("model.preview.value.notSupported")
           }
-          const avg = () => (cost() ? avgPrice(cost()!) : undefined)
+          const avg = () => (cost() && hasPricing() ? avgPrice(cost()!) : undefined)
+          const freeLabel = () => language.t("model.tag.free")
+          const dataLabel = () => freeDataLabel(language.t("model.tag.free"), language.t("model.tag.dataCollected"))
+          const autoLabel = () => autoSummary(model())
+          const choices = () => autoChoices(model(), props.models ?? [])
+          const choicesLabel = () => language.t("model.preview.group.autoEfficientChoices")
           const ctx = () => model().limit?.context ?? model().contextLength
           const caps = () => model().capabilities
           const inputs = () => caps()?.input
@@ -61,35 +77,56 @@ export const ModelPreview: Component<Props> = (props) => {
 
           return (
             <>
-              <Show when={model().isFree}>
-                <span class="model-preview-badge model-preview-badge--free model-preview-badge--top-right">
-                  {language.t("model.tag.free")}
-                </span>
-              </Show>
               {/* Header — name + provider + star */}
               <div class="model-preview-header">
-                <div class="model-preview-name-row">
-                  <span class="model-preview-name">{sanitizeName(model().name)}</span>
-                  <Show when={session}>
-                    {(() => {
-                      const starred = () =>
-                        session!
-                          .favoriteModels()
-                          .some((f) => f.providerID === model().providerID && f.modelID === model().id)
-                      return (
-                        <button
-                          type="button"
-                          class={`model-selector-star model-selector-star--preview${starred() ? " model-selector-star--active" : ""}`}
-                          aria-label={
-                            starred() ? language.t("model.favorite.remove") : language.t("model.favorite.add")
-                          }
-                          aria-pressed={starred()}
-                          onClick={() => session!.toggleFavorite(model().providerID, model().id)}
-                        >
-                          <Icon name={starred() ? "star-filled" : "star"} size="small" />
-                        </button>
-                      )
-                    })()}
+                <div class="model-preview-title-row">
+                  <div class="model-preview-name-row">
+                    <span class="model-preview-name">{sanitizeName(model().name)}</span>
+                    <Show when={session}>
+                      {(() => {
+                        const starred = () =>
+                          session!
+                            .favoriteModels()
+                            .some((f) => f.providerID === model().providerID && f.modelID === model().id)
+                        return (
+                          <button
+                            type="button"
+                            class={`model-selector-star model-selector-star--preview${starred() ? " model-selector-star--active" : ""}`}
+                            aria-label={
+                              starred() ? language.t("model.favorite.remove") : language.t("model.favorite.add")
+                            }
+                            aria-pressed={starred()}
+                            onClick={() => session!.toggleFavorite(model().providerID, model().id)}
+                          >
+                            <Icon name={starred() ? "star-filled" : "star"} size="small" />
+                          </button>
+                        )
+                      })()}
+                    </Show>
+                  </div>
+                  <Show when={isAuto(model()) || model().isFree || hasByok(model()) || isDataCollectedModel(model())}>
+                    <span class="model-preview-free-data">
+                      <Show when={isAuto(model())}>
+                        <Tooltip value={autoLabel()} placement="top">
+                          <span class="model-preview-auto-icon" aria-label={autoLabel()}>
+                            <Icon name="models" size="small" />
+                          </span>
+                        </Tooltip>
+                      </Show>
+                      <Show when={model().isFree && !hasByok(model())}>
+                        <span class="model-preview-badge model-preview-badge--free">{freeLabel()}</span>
+                      </Show>
+                      <Show when={hasByok(model())}>
+                        <span class="model-preview-badge">BYOK</span>
+                      </Show>
+                      <Show when={isDataCollectedModel(model())}>
+                        <Tooltip value={dataLabel()} placement="top">
+                          <span class="model-preview-free-data-icon" aria-label={dataLabel()}>
+                            <Icon name="book-open-check" size="small" />
+                          </span>
+                        </Tooltip>
+                      </Show>
+                    </span>
                   </Show>
                 </div>
                 <span class="model-preview-provider">{model().providerName}</span>
@@ -103,8 +140,8 @@ export const ModelPreview: Component<Props> = (props) => {
                   <span class="model-preview-value">{fmtDate(model().releaseDate!)}</span>
                 </Show>
 
-                {/* Pricing — hidden for free models */}
-                <Show when={cost() && !model().isFree}>
+                {/* Pricing — hidden for free models or models without fixed pricing */}
+                <Show when={cost() && !model().isFree && hasPricing()}>
                   <span class="model-preview-label">{language.t("model.preview.label.input")}</span>
                   <span class="model-preview-value">{fmtPrice(cost()!.input)}</span>
                   <span class="model-preview-label">{language.t("model.preview.label.output")}</span>
@@ -119,12 +156,32 @@ export const ModelPreview: Component<Props> = (props) => {
                   <span class="model-preview-value">{fmtPrice(avg()!)}</span>
                 </Show>
 
+                <Show when={isDataCollectedModel(model())}>
+                  <span class="model-preview-data-line" aria-label={dataLabel()}>
+                    <Icon name="book-open-check" size="small" />
+                    <span>- {dataLabel()}</span>
+                  </span>
+                </Show>
+
                 {/* Context window */}
                 <Show when={ctx()}>
                   <span class="model-preview-label">{language.t("model.preview.label.context")}</span>
                   <span class="model-preview-value">{fmtContext(ctx()!)}</span>
                 </Show>
               </div>
+
+              {/* Terminal Bench — independent from token pricing */}
+              <Show when={bench()}>
+                <div class="model-preview-group">
+                  <span class="model-preview-group-title">{language.t("model.preview.group.terminalBench")}</span>
+                  <div class="model-preview-grid">
+                    <span class="model-preview-label">{language.t("model.preview.label.completion")}</span>
+                    <span class="model-preview-value">{fmtTerminalBenchScore(bench()!.overallScore)}</span>
+                    <span class="model-preview-label">{language.t("model.preview.label.costAttempt")}</span>
+                    <span class="model-preview-value">{fmtAttemptCost(bench()!.avgAttemptCostUsd)}</span>
+                  </div>
+                </div>
+              </Show>
 
               {/* Capabilities — free badge moved to header */}
               <Show when={caps()?.reasoning || activeModalities().length > 0}>
@@ -142,6 +199,22 @@ export const ModelPreview: Component<Props> = (props) => {
               <Show when={model().options?.description}>
                 <div class="model-preview-description">
                   <Markdown text={model().options!.description!} />
+                </div>
+              </Show>
+
+              <Show when={choices().length > 0}>
+                <div class="model-preview-group">
+                  <span class="model-preview-group-title">{choicesLabel()}</span>
+                  <div class="model-preview-candidates" aria-label={choicesLabel()}>
+                    <For each={choices()}>
+                      {(item) => (
+                        <span class="model-preview-candidate" title={item.id}>
+                          <span class="model-preview-candidate-name">{item.name}</span>
+                          <span class="model-preview-candidate-id">{item.id}</span>
+                        </span>
+                      )}
+                    </For>
+                  </div>
                 </div>
               </Show>
             </>

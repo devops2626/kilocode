@@ -5,14 +5,14 @@ import { showToast } from "@kilocode/kilo-ui/toast"
 import { useLanguage } from "../../context/language"
 import { useVSCode } from "../../context/vscode"
 import { useConfig } from "../../context/config"
-import type { Config, ConnectionState, ExtensionMessage } from "../../types/messages"
+import type { Config, ConnectionState, ExtensionMessage, MigrationSource } from "../../types/messages"
 import { buildExport, parseImport, MAX_IMPORT_SIZE } from "./settings-io"
 
 export interface AboutKiloCodeTabProps {
   port: number | null
   connectionState: ConnectionState
   extensionVersion?: string
-  onMigrateClick?: () => void // legacy-migration
+  onMigrationClick?: (source: MigrationSource) => void
 }
 
 const AboutKiloCodeTab: Component<AboutKiloCodeTabProps> = (props) => {
@@ -315,9 +315,8 @@ const AboutKiloCodeTab: Component<AboutKiloCodeTabProps> = (props) => {
         </div>
       </div>
 
-      {/* legacy-migration start */}
-      <div style={{ ...sectionStyle, "margin-bottom": "0" }}>
-        <h4 style={headingStyle}>{language.t("settings.aboutKiloCode.legacyMigration.title")}</h4>
+      <div style={sectionStyle}>
+        <h4 style={headingStyle}>{language.t("settings.aboutKiloCode.rooImport.button")}</h4>
         <p
           style={{
             "font-size": "var(--kilo-font-size-12)",
@@ -326,25 +325,12 @@ const AboutKiloCodeTab: Component<AboutKiloCodeTabProps> = (props) => {
             "line-height": "1.5",
           }}
         >
-          {language.t("settings.aboutKiloCode.legacyMigration.description")}
+          {language.t("settings.aboutKiloCode.rooImport.description")}
         </p>
-        <button
-          type="button"
-          onClick={() => props.onMigrateClick?.()}
-          style={{
-            background: "var(--vscode-button-background)",
-            color: "var(--vscode-button-foreground)",
-            border: "none",
-            padding: "6px 14px",
-            "border-radius": "2px",
-            cursor: "pointer",
-            "font-size": "var(--kilo-font-size-12)",
-          }}
-        >
-          {language.t("settings.legacyMigration.link")}
-        </button>
+        <Button variant="secondary" size="small" onClick={() => props.onMigrationClick?.("roo")}>
+          {language.t("settings.aboutKiloCode.rooImport.button")}
+        </Button>
       </div>
-      {/* legacy-migration end */}
 
       {/* Reset Settings */}
       <div style={sectionStyle}>
@@ -359,21 +345,18 @@ const AboutKiloCodeTab: Component<AboutKiloCodeTabProps> = (props) => {
         >
           {language.t("settings.aboutKiloCode.resetSettings.description")}
         </p>
-        <button
-          type="button"
-          onClick={() => vscode.postMessage({ type: "resetAllSettings" })}
-          style={{
-            background: "var(--vscode-button-background)",
-            color: "var(--vscode-button-foreground)",
-            border: "none",
-            padding: "6px 14px",
-            "border-radius": "2px",
-            cursor: "pointer",
-            "font-size": "var(--kilo-font-size-12)",
-          }}
-        >
-          {language.t("settings.aboutKiloCode.resetSettings.button")}
-        </button>
+        <div style={{ display: "flex", gap: "8px", "flex-wrap": "wrap" }}>
+          <Button variant="primary" size="small" onClick={() => vscode.postMessage({ type: "resetAllSettings" })}>
+            {language.t("settings.aboutKiloCode.resetSettings.button")}
+          </Button>
+          <Button
+            variant="secondary"
+            size="small"
+            onClick={() => vscode.postMessage({ type: "resetReadNotifications" })}
+          >
+            {language.t("settings.aboutKiloCode.resetSettings.notificationsButton")}
+          </Button>
+        </div>
       </div>
     </div>
   )

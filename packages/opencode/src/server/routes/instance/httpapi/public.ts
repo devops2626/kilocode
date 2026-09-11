@@ -1,6 +1,10 @@
 import { OpenApi } from "effect/unstable/httpapi"
-import { matchLegacyKiloOpenApi } from "@/kilocode/server/httpapi/public" // kilocode_change
+// kilocode_change start
+import { matchLegacyKiloOpenApi } from "@/kilocode/server/httpapi/public"
+import * as KiloServer from "@/kilocode/server/server"
+// kilocode_change end
 import { OpenCodeHttpApi } from "./api"
+import { QueryBooleanOpenApi } from "./groups/query"
 
 type OpenApiParameter = {
   name: string
@@ -52,49 +56,48 @@ type OpenApiResponse = {
   content?: Record<string, { schema?: OpenApiSchema }>
 }
 
-// Instance routes use middleware for directory/workspace resolution, but HttpApi
-// doesn't surface middleware query params in the spec. Inject them explicitly.
-const InstanceQueryParameters = [
-  {
-    name: "directory",
-    in: "query",
-    required: false,
-    schema: { type: "string" },
-  },
-  {
-    name: "workspace",
-    in: "query",
-    required: false,
-    schema: { type: "string" },
-  },
-] satisfies OpenApiParameter[]
-
 // Query schemas describe decoded Effect values, but the generated SDK needs the
 // public call shape. These keep SDK callers passing numbers/booleans while the
 // server still decodes string query params at runtime.
-const QueryNumberParameters = new Set(["start", "cursor", "limit", "method"])
-const QueryBooleanParameters = new Set(["roots", "archived"])
-const QueryParameterSchemas = {
+const QueryParameterSchemas: Record<string, OpenApiSchema> = {
+  "GET /experimental/session start": { type: "number" },
+  "GET /experimental/session roots": QueryBooleanOpenApi,
+  "GET /experimental/session archived": QueryBooleanOpenApi,
   "GET /find/file limit": { type: "integer", minimum: 1, maximum: 200 },
-  "GET /experimental/session worktrees": { type: "boolean" }, // kilocode_change
-  "GET /kilo/cloud-sessions cursor": { type: "string" }, // kilocode_change
-  "GET /session/{sessionID}/diff messageID": { type: "string", pattern: "^msg.*" },
+  // kilocode_change start
+  "GET /experimental/session worktrees": { type: "boolean" },
+  "GET /kilo/cloud-sessions cursor": { type: "string" },
+  "GET /kilo/cloud-sessions limit": { type: "number" },
+  // kilocode_change end
+  "GET /experimental/session cursor": { type: "number" },
+  "GET /experimental/session limit": { type: "number" },
+  "GET /session start": { type: "number" },
+  "GET /session roots": QueryBooleanOpenApi,
+  "GET /session limit": { type: "number" },
+  "DELETE /session/{sessionID}/message/{messageID} queued": QueryBooleanOpenApi, // kilocode_change
   "GET /session/{sessionID}/message limit": { type: "integer", minimum: 0, maximum: Number.MAX_SAFE_INTEGER },
-} satisfies Record<string, OpenApiSchema>
+  "GET /vcs/diff context": { type: "integer", minimum: 0 },
+  "GET /api/session limit": { type: "number" },
+  "GET /api/session start": { type: "number" },
+  "GET /api/session roots": QueryBooleanOpenApi,
+  "GET /api/session/{sessionID}/message limit": { type: "number" },
+}
 
-const PathParameterSchemas = {
+// kilocode_change start
+const PathParameterSchemas: Record<string, OpenApiSchema> = {
   sessionID: { type: "string", pattern: "^ses.*" },
   messageID: { type: "string", pattern: "^msg.*" },
   partID: { type: "string", pattern: "^prt.*" },
   permissionID: { type: "string", pattern: "^per.*" },
   ptyID: { type: "string", pattern: "^pty.*" },
-} satisfies Record<string, OpenApiSchema>
+}
+// kilocode_change end
 
-const LegacyComponentDescriptions = {
+const LegacyComponentDescriptions: Record<string, string> = {
   LogLevel: "Log level",
   ServerConfig: "Server configuration for the kilo serve command", // kilocode_change
   LayoutConfig: "@deprecated Always uses stretch layout.",
-} satisfies Record<string, string>
+}
 
 function matchLegacyOpenApi(input: Record<string, unknown>) {
   const spec = input as OpenApiSpec
@@ -114,25 +117,21 @@ function matchLegacyOpenApi(input: Record<string, unknown>) {
   }
   normalizeComponentNames(spec)
   collapseDuplicateComponents(spec)
+  restoreAgentManagerNulls(spec) // kilocode_change
   applyLegacySchemaOverrides(spec)
   normalizeComponentDescriptions(spec)
   addLegacyErrorSchemas(spec)
-  delete spec.components?.schemas?.Unauthorized
-  delete spec.components?.schemas?.EffectHttpApiErrorBadRequest
-  delete spec.components?.schemas?.EffectHttpApiErrorNotFound
-  delete spec.components?.schemas?.effect_HttpApiError_BadRequest
-  delete spec.components?.schemas?.effect_HttpApiError_NotFound
   delete spec.components?.securitySchemes
 
   for (const [path, item] of Object.entries(spec.paths ?? {})) {
-    const isInstanceRoute = !path.startsWith("/global/") && !path.startsWith("/auth/")
     for (const method of ["get", "post", "put", "delete", "patch"] as const) {
       const operation = item[method]
       if (!operation) continue
+      const isV2Api = isV2ApiPath(path)
       if (operation.requestBody) {
-        // Hono's generated OpenAPI never marked request bodies as required. Keep
-        // that SDK surface stable during the HttpApi migration.
-        delete operation.requestBody.required
+        // The legacy OpenAPI surface never marked request bodies as required.
+        // Keep that SDK surface stable while the HttpApi spec is tightened.
+        if (!isV2Api) delete operation.requestBody.required
         const body = operation.requestBody.content?.["application/json"]
         if (body?.schema) body.schema = stripOptionalNull(structuredClone(body.schema))
         if (path === "/experimental/workspace" && method === "post") {
@@ -165,13 +164,16 @@ function matchLegacyOpenApi(input: Record<string, unknown>) {
           if (content.schema) content.schema = stripOptionalNull(structuredClone(content.schema))
         }
       }
-      // Hono applied auth as runtime middleware outside OpenAPI metadata, so the
-      // legacy SDK did not expose auth schemes or generated 401 error unions.
-      delete operation.security
-      delete operation.responses?.["401"]
-      normalizeLegacyErrorResponses(operation)
+      if (!isV2Api) {
+        // Auth is still runtime middleware outside the legacy public OpenAPI
+        // metadata, so the legacy SDK should not expose auth schemes or
+        // generated 401 error unions.
+        delete operation.security
+        delete operation.responses?.["401"]
+        normalizeLegacyErrorResponses(operation)
+      }
       normalizeLegacyOperation(operation, path, method)
-      if ((path === "/event" || path === "/global/event") && method === "get") {
+      if ((path === "/event" || path === "/global/event" || path === "/api/event") && method === "get") {
         // HttpApi has no first-class SSE response schema, and these handlers are
         // raw/streaming routes. Document the actual wire protocol explicitly.
         operation.responses!["200"] = {
@@ -181,40 +183,44 @@ function matchLegacyOpenApi(input: Record<string, unknown>) {
               schema:
                 path === "/event"
                   ? { $ref: "#/components/schemas/Event" }
-                  : { $ref: "#/components/schemas/GlobalEvent" },
+                  : path === "/global/event"
+                    ? { $ref: "#/components/schemas/GlobalEvent" }
+                    : { $ref: "#/components/schemas/V2Event" },
             },
           },
         }
       }
-      if (!isInstanceRoute) continue
-      operation.parameters = [
-        ...InstanceQueryParameters,
-        ...(operation.parameters ?? []).filter(
-          (param) => param.in !== "query" || (param.name !== "directory" && param.name !== "workspace"),
-        ),
-      ]
-      for (const param of operation.parameters) normalizeParameter(param, `${method.toUpperCase()} ${path}`)
+      const route = `${method.toUpperCase()} ${path}`
+      for (const param of operation.parameters ?? []) normalizeParameter(param, route)
     }
   }
+  deleteUnusedLegacyErrorComponents(spec)
   matchLegacyKiloOpenApi(input) // kilocode_change
   return input
+}
+
+function isV2ApiPath(path: string) {
+  return path === "/api" || path.startsWith("/api/")
 }
 
 function addLegacyErrorSchemas(spec: OpenApiSpec) {
   if (!spec.components?.schemas) return
   spec.components.schemas.BadRequestError = {
     type: "object",
-    required: ["data", "errors", "success"],
+    required: ["name", "data"],
     properties: {
-      data: {},
-      errors: {
-        type: "array",
-        items: {
-          type: "object",
-          additionalProperties: {},
+      name: { type: "string", enum: ["BadRequest"] },
+      data: {
+        type: "object",
+        required: ["message"],
+        properties: {
+          message: { type: "string" },
+          kind: {
+            type: "string",
+            enum: ["Params", "Headers", "Query", "Body", "Payload"],
+          },
         },
       },
-      success: { type: "boolean", enum: [false] },
     },
   }
   spec.components.schemas.NotFoundError = {
@@ -301,7 +307,7 @@ function applyLegacySchemaOverrides(spec: OpenApiSpec) {
 
 function normalizeComponentDescriptions(spec: OpenApiSpec) {
   for (const [name, schema] of Object.entries(spec.components?.schemas ?? {})) {
-    const description = LegacyComponentDescriptions[name as keyof typeof LegacyComponentDescriptions]
+    const description = LegacyComponentDescriptions[name]
     if (description) {
       schema.description = description
       continue
@@ -365,7 +371,7 @@ function rewriteRefs(input: unknown, from: string, to: string): void {
 }
 
 function normalizeLegacyErrorResponses(operation: OpenApiOperation) {
-  if (operation.responses?.["400"] && isBuiltInErrorResponse(operation.responses["400"], "BadRequest")) {
+  if (operation.responses?.["400"] && isLegacyBadRequestResponse(operation.responses["400"])) {
     operation.responses["400"] = legacyErrorResponse("Bad request", "BadRequestError")
   }
   if (operation.responses?.["404"] && isBuiltInErrorResponse(operation.responses["404"], "NotFound")) {
@@ -373,9 +379,28 @@ function normalizeLegacyErrorResponses(operation: OpenApiOperation) {
   }
 }
 
+function deleteUnusedLegacyErrorComponents(spec: OpenApiSpec) {
+  for (const name of [
+    "Unauthorized",
+    "EffectHttpApiErrorBadRequest",
+    "EffectHttpApiErrorNotFound",
+    "effect_HttpApiError_BadRequest",
+    "effect_HttpApiError_NotFound",
+  ]) {
+    if (referencesComponent(spec.paths, name)) continue
+    delete spec.components?.schemas?.[name]
+  }
+}
+
+function referencesComponent(input: unknown, name: string): boolean {
+  if (Array.isArray(input)) return input.some((item) => referencesComponent(item, name))
+  if (!input || typeof input !== "object") return false
+  if ((input as OpenApiSchema).$ref === `#/components/schemas/${name}`) return true
+  return Object.values(input).some((value) => referencesComponent(value, name))
+}
+
 function normalizeLegacyOperation(operation: OpenApiOperation, path: string, method: string) {
   if (path === "/experimental/console/switch" && method === "post") delete operation.responses?.["400"]
-  if (path === "/pty/{ptyID}" && method === "put") delete operation.responses?.["404"]
   if ((path !== "/session/{sessionID}/message" && path !== "/session/{sessionID}/command") || method !== "post") return
   const response = operation.responses?.["200"]?.content?.["application/json"]
   if (!response) return
@@ -398,6 +423,10 @@ function isRefResponse(response: OpenApiResponse, name: string) {
 
 function isBuiltInErrorResponse(response: OpenApiResponse, name: "BadRequest" | "NotFound") {
   return response.description === name || isRefResponse(response, `EffectHttpApiError${name}`)
+}
+
+function isLegacyBadRequestResponse(response: OpenApiResponse) {
+  return isBuiltInErrorResponse(response, "BadRequest") || isRefResponse(response, "InvalidRequestError")
 }
 
 function legacyErrorResponse(description: string, name: "BadRequestError" | "NotFoundError"): OpenApiResponse {
@@ -447,7 +476,7 @@ function fixSelfReferencingComponents(spec: OpenApiSpec) {
     }
   }
   // Simplest fix: generate the raw spec (without transform) to get correct schemas
-  const raw = OpenApi.fromApi(OpenCodeHttpApi) as unknown as OpenApiSpec
+  const raw: OpenApiSpec = OpenApi.fromApi(OpenCodeHttpApi)
   const rawSchemas = raw.components?.schemas
   if (!rawSchemas) return
   for (const name of selfRefs) {
@@ -492,6 +521,20 @@ function stripOptionalNull(schema: OpenApiSchema): OpenApiSchema {
   return schema
 }
 
+// kilocode_change start - preserve nullable Agent Manager move targets in generated SDK schemas
+function restoreAgentManagerNulls(spec: OpenApiSpec) {
+  const schemas = spec.components?.schemas
+  if (!schemas) return
+  for (const name of ["AgentManagerMoveRequest", "AgentManagerMoveResult"]) {
+    const schema = schemas[name]
+    if (!schema?.properties?.sectionID) continue
+    schema.properties.sectionID = {
+      anyOf: [schema.properties.sectionID, { type: "null" }],
+    }
+  }
+}
+// kilocode_change end
+
 function isEmptyObjectUnion(schema: OpenApiSchema) {
   const options = schema.anyOf ?? schema.oneOf
   return options?.length === 2 && options.some(isBareObjectSchema) && options.some(isBareArraySchema)
@@ -512,46 +555,38 @@ function flattenOptions(options: OpenApiSchema[] | undefined): OpenApiSchema[] |
 function normalizeParameter(param: OpenApiParameter, route: string) {
   if (!param.schema || typeof param.schema !== "object") return
   if (param.in === "path") {
-    param.schema = pathParameterSchema(route, param.name) ?? stripOptionalNull(param.schema)
+    param.schema = pathParameterSchema(route, param.name) ?? stripOptionalNull(param.schema) // kilocode_change
     return
   }
   if (param.in === "query") {
-    const override = QueryParameterSchemas[`${route} ${param.name}` as keyof typeof QueryParameterSchemas]
+    const override = QueryParameterSchemas[`${route} ${param.name}`]
     if (override) {
       param.schema = override
-      return
-    }
-    if (QueryNumberParameters.has(param.name)) {
-      param.schema = { type: "number" }
-      return
-    }
-    if (QueryBooleanParameters.has(param.name)) {
-      param.schema = {
-        anyOf: [{ type: "boolean" }, { type: "string", enum: ["true", "false"] }],
-      }
       return
     }
   }
   param.schema = stripOptionalNull(param.schema)
 }
 
+// kilocode_change start
 function pathParameterSchema(route: string, name: string) {
-  if (name in PathParameterSchemas) return PathParameterSchemas[name as keyof typeof PathParameterSchemas]
+  if (name in PathParameterSchemas) return PathParameterSchemas[name]
   if (name === "id" && route.startsWith("DELETE /experimental/workspace/")) return { type: "string", pattern: "^wrk.*" }
   if (name === "id" && route.startsWith("POST /experimental/workspace/")) return { type: "string", pattern: "^wrk.*" }
-  if (name === "processID" && route.includes(" /background-process/")) return { type: "string", pattern: "^bgp.*" } // kilocode_change
+  if (name === "processID" && route.includes(" /background-process/")) return { type: "string", pattern: "^bgp.*" }
   if (name === "requestID" && route.startsWith("POST /permission/")) return { type: "string", pattern: "^per.*" }
   if (name === "requestID" && route.startsWith("POST /question/")) return { type: "string", pattern: "^que.*" }
-  // /network/* reuses QuestionID (prefix "que"), not a separate brand. // kilocode_change
-  if (name === "requestID" && route.startsWith("POST /network/")) return { type: "string", pattern: "^que.*" } // kilocode_change
+  // /network/* reuses QuestionID (prefix "que"), not a separate brand.
+  if (name === "requestID" && route.startsWith("POST /network/")) return { type: "string", pattern: "^que.*" }
   return undefined
 }
+// kilocode_change end
 
 export const PublicApi = OpenCodeHttpApi.annotateMerge(
   OpenApi.annotations({
-    title: "opencode",
+    title: KiloServer.DOC_TITLE, // kilocode_change
     version: "1.0.0",
-    description: "opencode api",
+    description: KiloServer.DOC_DESCRIPTION, // kilocode_change
     transform: matchLegacyOpenApi,
   }),
 )

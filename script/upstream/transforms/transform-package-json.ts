@@ -8,7 +8,7 @@
  * 3. Injecting Kilo-specific dependencies
  * 4. Preserving Kilo's version number
  * 5. Preserving overrides and patchedDependencies
- * 6. Preserving Kilo's repository configuration
+ * 6. Preserving Kilo's repository metadata
  * 7. Using "newest wins" strategy for dependency versions
  */
 
@@ -103,6 +103,63 @@ function compareVersions(a: string, b: string): number | null {
   }
 
   return 0
+}
+
+function bun(value: unknown): { value: string; version: string } | null {
+  if (typeof value !== "string") return null
+  const match = value.match(/^bun@(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)$/)
+  if (!match) return null
+  return { value, version: match[1] }
+}
+
+export function selectBunPackageManager(ours: unknown, theirs: unknown): string | undefined {
+  const left = bun(ours)
+  const right = bun(theirs)
+  if (left && right) return compareVersions(left.version, right.version)! >= 0 ? left.value : right.value
+  if (left) return left.value
+  if (right) return right.value
+  return undefined
+}
+
+export function fixPackageManager(
+  pkg: Record<string, unknown>,
+  path: string,
+  ours: Record<string, unknown> | null,
+  changes: string[],
+): void {
+  if (path !== "package.json") return
+  const next = selectBunPackageManager(ours?.packageManager, pkg.packageManager)
+  if (!next || pkg.packageManager === next) return
+  const prior = typeof pkg.packageManager === "string" ? pkg.packageManager : "missing or invalid"
+  changes.push(`packageManager: ${prior} -> ${next} (preserved Kilo pin)`)
+  pkg.packageManager = next
+}
+
+export function fixRepository(
+  pkg: Record<string, unknown>,
+  ours: Record<string, unknown> | null,
+  changes: string[],
+): void {
+  if (!ours) return
+  for (const key of ["repository", "homepage", "bugs"] as const) {
+    if (ours[key] === undefined || JSON.stringify(pkg[key]) === JSON.stringify(ours[key])) continue
+    pkg[key] = ours[key]
+    changes.push(`${key}: preserved Kilo metadata`)
+  }
+}
+
+export function assertBunPackageManager(current: unknown, base: unknown, upstream: unknown): void {
+  const inputs = [bun(base), bun(upstream)].filter((item): item is NonNullable<typeof item> => item !== null)
+  if (inputs.length === 0) return
+  const required = inputs.reduce((max, item) => (compareVersions(item.version, max.version)! > 0 ? item : max))
+  const actual = bun(current)
+  if (!actual) {
+    throw new Error(
+      `Bun packageManager validation failed: merged value is invalid; expected at least ${required.value}`,
+    )
+  }
+  if (compareVersions(actual.version, required.version)! >= 0) return
+  throw new Error(`Bun packageManager downgrade detected: merged ${actual.value}, expected at least ${required.value}`)
 }
 
 /**
@@ -225,23 +282,56 @@ const TRANSFORM_PACKAGE_NAMES: Record<string, string> = {
 // Upstream's version wholesale-replaces the scripts block, so anything listed
 // here gets re-applied from ours after taking theirs.
 const PRESERVE_SCRIPTS: Record<string, string[]> = {
-  "package.json": ["extension", "changeset", "changeset:version", "dev-setup", "postinstall"],
+  "package.json": [
+    "extension",
+    "extension:isolated",
+    "extension:isolated:clean",
+    "changeset",
+    "changeset:version",
+    "dev-setup",
+    "postinstall",
+    "dev:local",
+    "test:script:ci",
+  ],
   "packages/opencode/package.json": ["test", "test:ci"],
+  // Upstream-shared packages where Kilo adds a JUnit test:ci script for CI.
+  // Without these entries every merge silently schedules zero tests for them.
+  "packages/core/package.json": ["test:ci"],
+  "packages/effect-drizzle-sqlite/package.json": ["test:ci"],
+  "packages/http-recorder/package.json": ["test:ci"],
+  "packages/client/package.json": ["test:ci"],
+  "packages/httpapi-codegen/package.json": ["test:ci"],
+  "packages/llm/package.json": ["test:ci"],
+  "packages/sdk-next/package.json": ["test:ci"],
+  "packages/session-ui/package.json": ["test:ci"],
+  "packages/tui/package.json": ["test:ci"],
+  "packages/ui/package.json": ["test:ci"],
+  "packages/codemode/package.json": ["test:ci"],
+}
+
+// Upstream-only trusted dependencies to delete per package.json. Trusted deps
+// get native lifecycle scripts run on install; Kilo keeps tree-sitter-powershell
+// for its WASM grammar only and avoids a root node-gyp requirement, so
+// upstream's native-build trust must not come over.
+const DELETE_UPSTREAM_TRUSTED_DEPS: Record<string, string[]> = {
+  "package.json": ["tree-sitter-powershell"],
 }
 
 // Upstream-only scripts to delete per package.json. These reference packages
 // Kilo doesn't ship (desktop-electron, console/app, app) and would otherwise
 // reappear on every merge.
 const DELETE_UPSTREAM_SCRIPTS: Record<string, string[]> = {
-  "package.json": ["dev:desktop", "dev:web", "dev:console"],
+  "package.json": ["dev:desktop", "dev:web", "dev:console", "translate:app"],
 }
 
 // Upstream-only catalog entries to delete per package.json. These are pulled
 // in by upstream features (e.g. desktop Sentry integration) that Kilo doesn't
 // ship, so they add install weight with zero consumers in our tree.
 const DELETE_UPSTREAM_CATALOG: Record<string, string[]> = {
-  "package.json": ["@sentry/solid", "@sentry/vite-plugin"],
+  "package.json": ["@sentry/solid", "@sentry/vite-plugin", "opentui-spinner"],
 }
+
+const DELETE_UPSTREAM_DEPENDENCIES = new Set(["opentui-spinner"])
 
 /**
  * Re-apply Kilo-specific scripts on top of the upstream-shaped scripts block,
@@ -275,6 +365,50 @@ export function fixScripts(
 }
 
 /**
+ * Prune upstream-only trusted dependencies whose native lifecycle builds
+ * conflict with Kilo's install policy.
+ */
+export function fixTrustedDependencies(pkg: Record<string, unknown>, path: string, changes: string[]): void {
+  const trusted = pkg.trustedDependencies as string[] | undefined
+  if (!trusted) return
+  for (const name of DELETE_UPSTREAM_TRUSTED_DEPS[path] || []) {
+    const index = trusted.indexOf(name)
+    if (index !== -1) {
+      trusted.splice(index, 1)
+      changes.push(`trustedDependencies: removed ${name} (native build conflicts with Kilo install policy)`)
+    }
+  }
+}
+
+/**
+ * Drop upstream patchedDependencies entries that conflict with Kilo's pins or
+ * whose patch file did not come over. Kilo pins newer patched versions of some
+ * packages (e.g. fff-bun, pacote, xai), and stale upstream entries for the
+ * same package, or entries with a missing patch file, break bun install.
+ */
+export async function prunePatchedDependencies(
+  pkg: Record<string, unknown>,
+  ours: Record<string, unknown> | null,
+  changes: string[],
+): Promise<void> {
+  const patched = pkg.patchedDependencies as Record<string, string> | undefined
+  const ourPatched = (ours?.patchedDependencies as Record<string, string> | undefined) || {}
+  if (!patched || Object.keys(ourPatched).length === 0) return
+  const ourPackages = new Set(Object.keys(ourPatched).map((key) => key.replace(/@[^@]+$/, "")))
+  for (const [key, patch] of Object.entries(patched)) {
+    if (!(key in ourPatched) && ourPackages.has(key.replace(/@[^@]+$/, ""))) {
+      delete patched[key]
+      changes.push(`patchedDependencies: dropped upstream ${key} (Kilo pins a different version)`)
+      continue
+    }
+    if (patch && !(await Bun.file(patch).exists())) {
+      delete patched[key]
+      changes.push(`patchedDependencies: dropped ${key} (patch file ${patch} not present)`)
+    }
+  }
+}
+
+/**
  * Prune upstream-only catalog entries that have no consumers in Kilo.
  */
 export function fixCatalog(pkg: Record<string, unknown>, path: string, changes: string[]): void {
@@ -289,6 +423,24 @@ export function fixCatalog(pkg: Record<string, unknown>, path: string, changes: 
   }
 }
 
+export function fixMetadata(
+  pkg: Record<string, unknown>,
+  path: string,
+  ours: Record<string, unknown> | null,
+  changes: string[],
+): void {
+  if (path !== "packages/opencode/package.json") return
+  if (!ours) return
+  if (Array.isArray(ours.keywords) && JSON.stringify(pkg.keywords) !== JSON.stringify(ours.keywords)) {
+    pkg.keywords = ours.keywords
+    changes.push("keywords: preserved from base")
+  }
+  if (typeof ours.private === "boolean" && pkg.private !== ours.private) {
+    pkg.private = ours.private
+    changes.push("private: preserved from base")
+  }
+}
+
 /**
  * Check if file is a package.json
  */
@@ -299,7 +451,7 @@ export function isPackageJson(file: string): boolean {
 /**
  * Transform dependencies in package.json
  */
-function transformDependencies(deps: Record<string, string> | undefined): {
+export function transformDependencies(deps: Record<string, string> | undefined): {
   result: Record<string, string>
   changes: string[]
 } {
@@ -309,6 +461,10 @@ function transformDependencies(deps: Record<string, string> | undefined): {
   const changes: string[] = []
 
   for (const [name, version] of Object.entries(deps)) {
+    if (DELETE_UPSTREAM_DEPENDENCIES.has(name)) {
+      changes.push(`${name}: removed (incompatible OpenTUI runtime)`)
+      continue
+    }
     const newName = PACKAGE_NAME_MAP[name]
     if (newName) {
       result[newName] = version
@@ -374,6 +530,8 @@ export async function transformPackageJson(file: string, options: PackageJsonOpt
       pkg.name = newName
     }
 
+    fixPackageManager(pkg, relativePath, ourPkg, changes)
+
     // 2. Preserve Kilo version if requested
     if (options.preserveVersion !== false) {
       const kiloVersion = await getCurrentVersion()
@@ -416,6 +574,7 @@ export async function transformPackageJson(file: string, options: PackageJsonOpt
       const ourPatchedDeps = ourPkg.patchedDependencies as Record<string, string> | undefined
       if (ourPatchedDeps) {
         pkg.patchedDependencies = pkg.patchedDependencies || {}
+        await prunePatchedDependencies(pkg, ourPkg, changes)
         for (const [name, patch] of Object.entries(ourPatchedDeps)) {
           if (!pkg.patchedDependencies[name]) {
             pkg.patchedDependencies[name] = patch
@@ -424,12 +583,10 @@ export async function transformPackageJson(file: string, options: PackageJsonOpt
         }
       }
 
-      // 6. Preserve repository (Kilo-specific, upstream doesn't have this)
-      const ourRepo = ourPkg.repository
-      if (ourRepo && JSON.stringify(pkg.repository) !== JSON.stringify(ourRepo)) {
-        pkg.repository = ourRepo
-        changes.push(`repository: preserved Kilo's repository configuration`)
-      }
+      // 6. Preserve repository metadata so published packages keep Kilo links
+      fixRepository(pkg, ourPkg, changes)
+
+      fixMetadata(pkg, relativePath, ourPkg, changes)
 
       // 7. Handle workspaces for root package.json
       // Kilo has removed hosted platform packages (console/*, slack, etc.)
@@ -457,6 +614,7 @@ export async function transformPackageJson(file: string, options: PackageJsonOpt
       }
 
       fixCatalog(pkg, relativePath, changes)
+      fixTrustedDependencies(pkg, relativePath, changes)
     }
 
     // 7. Transform dependency names (opencode -> kilo)
@@ -592,6 +750,8 @@ export async function transformAllPackageJson(options: PackageJsonOptions = {}):
         pkg.name = newName
       }
 
+      fixPackageManager(pkg, path, kiloPkg, changes)
+
       // 2. Preserve Kilo version if requested
       if (options.preserveVersion !== false) {
         const kiloVersion = await getCurrentVersion()
@@ -634,6 +794,7 @@ export async function transformAllPackageJson(options: PackageJsonOptions = {}):
         const kiloPatchedDeps = kiloPkg.patchedDependencies as Record<string, string> | undefined
         if (kiloPatchedDeps) {
           pkg.patchedDependencies = pkg.patchedDependencies || {}
+          await prunePatchedDependencies(pkg, kiloPkg, changes)
           for (const [name, patch] of Object.entries(kiloPatchedDeps)) {
             if (!pkg.patchedDependencies[name]) {
               pkg.patchedDependencies[name] = patch
@@ -648,6 +809,8 @@ export async function transformAllPackageJson(options: PackageJsonOptions = {}):
           pkg.repository = kiloRepo
           changes.push(`repository: preserved Kilo's repository configuration`)
         }
+
+        fixMetadata(pkg, path, kiloPkg, changes)
 
         // 7. Handle workspaces for root package.json
         // Kilo has removed hosted platform packages (console/*, slack, etc.)
@@ -679,6 +842,7 @@ export async function transformAllPackageJson(options: PackageJsonOptions = {}):
         }
 
         fixCatalog(pkg, path, changes)
+        fixTrustedDependencies(pkg, path, changes)
       }
 
       // 7. Transform dependency names (opencode -> kilo)
@@ -793,6 +957,7 @@ export async function reconcilePackageJsonFromRefs(
     if (!ourPkg) return { file, action: "skipped", changes: [], dryRun }
     pkg = JSON.parse(JSON.stringify(ourPkg))
   }
+  if (!pkg) return { file, action: "skipped", changes: [], dryRun }
 
   const relativePath = file.replace(process.cwd() + "/", "")
   const newName = TRANSFORM_PACKAGE_NAMES[relativePath]
@@ -800,6 +965,8 @@ export async function reconcilePackageJsonFromRefs(
     changes.push(`name: ${pkg.name} -> ${newName}`)
     pkg.name = newName
   }
+
+  fixPackageManager(pkg, relativePath, ourPkg, changes)
 
   if (options.preserveVersion !== false) {
     const kiloVersion = await getCurrentVersion()
@@ -842,6 +1009,7 @@ export async function reconcilePackageJsonFromRefs(
     const ourPatched = ourPkg.patchedDependencies as Record<string, string> | undefined
     if (ourPatched) {
       pkg.patchedDependencies = (pkg.patchedDependencies as Record<string, string>) || {}
+      await prunePatchedDependencies(pkg, ourPkg, changes)
       const patched = pkg.patchedDependencies as Record<string, string>
       for (const [name, patch] of Object.entries(ourPatched)) {
         if (!patched[name]) {
@@ -856,6 +1024,8 @@ export async function reconcilePackageJsonFromRefs(
       pkg.repository = ourRepo
       changes.push(`repository: preserved Kilo's repository configuration`)
     }
+
+    fixMetadata(pkg, relativePath, ourPkg, changes)
 
     const ourWs = ourPkg.workspaces as { packages?: string[]; catalog?: Record<string, string> } | undefined
     const theirWs = pkg.workspaces as { packages?: string[]; catalog?: Record<string, string> } | undefined
@@ -879,6 +1049,7 @@ export async function reconcilePackageJsonFromRefs(
     }
 
     fixCatalog(pkg, relativePath, changes)
+    fixTrustedDependencies(pkg, relativePath, changes)
   }
 
   if (pkg.dependencies) {

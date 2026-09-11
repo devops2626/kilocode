@@ -1,4 +1,3 @@
-// kilocode_change - new file
 /**
  * Kilo-specific overrides for the provider dialog.
  *
@@ -10,6 +9,7 @@ import type { JSX } from "solid-js"
 import type { RGBA } from "@opentui/core"
 import type { ProviderAuthAuthorization } from "@kilocode/sdk/v2"
 import { KiloAutoMethod } from "@/kilocode/components/dialog-kilo-auto-method"
+export { selectProvider } from "@/kilocode/anaconda-desktop/tui/setup"
 
 // ---------------------------------------------------------------------------
 // Failed-state gutter/description helpers
@@ -51,6 +51,7 @@ export const PROVIDER_PRIORITY: Record<string, number> = {
   "github-copilot": 1,
   openai: 2,
   google: 3,
+  "anaconda-desktop": 4,
 }
 
 // ---------------------------------------------------------------------------
@@ -61,11 +62,21 @@ export const PROVIDER_DESCRIPTIONS: Record<string, string> = {
   kilo: "(Recommended)",
   anthropic: "(Claude Max or API key)",
   openai: "(ChatGPT login or API key)",
+  "anaconda-desktop": "(Local models)",
 }
 
 export const PROVIDER_TITLES: Record<string, string> = {
   openai: "OpenAI / Codex",
 }
+
+/** Local OpenAI-compatible providers where API key is optional (localhost). */
+export const LOCAL_OPTIONAL_API_KEY = new Set(["atomic-chat", "lmstudio"])
+
+export function isLocalOptionalApiKey(providerID: string) {
+  return LOCAL_OPTIONAL_API_KEY.has(providerID)
+}
+
+export const LOCAL_API_KEY_PLACEHOLDER = "local"
 
 // ---------------------------------------------------------------------------
 // Auto-method renderer
@@ -113,6 +124,13 @@ export function renderApiDescription(
   providerID: string,
   theme: { textMuted: RGBA; text: RGBA; primary: RGBA },
 ): (() => JSX.Element) | undefined {
+  if (providerID === "atomic-chat") {
+    return () => (
+      <text fg={theme.textMuted}>
+        Connect to Atomic Chat on this machine (default http://127.0.0.1:1337). Leave API key empty for local server.
+      </text>
+    )
+  }
   if (providerID !== "kilo") return undefined
   return () => (
     <box gap={1}>
@@ -124,4 +142,8 @@ export function renderApiDescription(
       </text>
     </box>
   )
+}
+
+export function apiKeyPlaceholder(providerID: string) {
+  return isLocalOptionalApiKey(providerID) ? "Optional for localhost" : "API key"
 }

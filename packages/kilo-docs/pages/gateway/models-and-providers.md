@@ -48,8 +48,8 @@ This returns model information including pricing, context window, and supported 
 | `openai/gpt-5.4-mini` | OpenAI | Fast and efficient |
 | `google/gemini-3.1-pro-preview` | Google | Advanced reasoning |
 | `google/gemini-2.5-flash` | Google | Fast and efficient |
-| `x-ai/grok-4` | xAI | Most capable Grok model |
-| `x-ai/grok-code-fast-1` | xAI | Optimized for code tasks |
+| `x-ai/grok-4` | SpaceXAI | Most capable Grok model |
+| `x-ai/grok-code-fast-1` | SpaceXAI | Optimized for code tasks |
 | `deepseek/deepseek-v3.2` | DeepSeek | Strong coding and reasoning model |
 | `moonshotai/kimi-k2.5` | Moonshot | Strong coding and multilingual model |
 | `minimax/minimax-m2.7` | MiniMax | High-performance MoE model |
@@ -60,20 +60,22 @@ Several models are available at no cost, subject to rate limits:
 
 | Model ID | Description |
 |---|---|
-| `x-ai/grok-code-fast-1:optimized:free` | xAI Grok Code Fast 1 Optimized |
-| `nvidia/nemotron-3-super-120b-a12b:free` | NVIDIA Nemotron 3 Super 120B |
-| `arcee-ai/trinity-large-thinking:free` | Arcee Trinity Large |
+| `stepfun/step-3.7-flash:free` | StepFun Step 3.7 Flash |
+| `poolside/laguna-s-2.1:free` | Poolside Laguna S 2.1 |
+| `poolside/laguna-xs-2.1:free` | Poolside Laguna XS 2.1 |
+| `nvidia/nemotron-3-ultra-550b-a55b:free` | NVIDIA Nemotron 3 Ultra |
+| `tencent/hy3:free` | Tencent Hy3 |
 | `openrouter/free` | Best available free model |
 
 Free models are available to both authenticated and anonymous users. Anonymous users are rate-limited to 200 requests per hour per IP address.
 
-{% callout type="warning" title="Nemotron 3 Super Free (NVIDIA free endpoints)" %}
-Provided under the [NVIDIA API Trial Terms of Service](https://assets.ngc.nvidia.com/products/api-catalog/legal/NVIDIA%20API%20Trial%20Terms%20of%20Service.pdf). Trial use only — not for production or sensitive data. Prompts and outputs are logged by NVIDIA to improve its models and services. Do not submit personal or confidential data.
+{% callout type="warning" title="NVIDIA free endpoints" %}
+For NVIDIA free endpoints (Super/Ultra/etc): Trial use only - do not submit personal or confidential data. Your use is logged for security purposes and to improve NVIDIA products and services. The logged session data for improvement purposes is not linked to your identity or any persistent identifier. For more information about our data processing practices, see our [Privacy Policy](https://www.nvidia.com/en-us/about-nvidia/privacy-policy/). By interacting with this endpoint, you consent to our collection, recording, and use of such information and the [NVIDIA API Trial Terms of Service](https://assets.ngc.nvidia.com/products/api-catalog/legal/NVIDIA%20API%20Trial%20Terms%20of%20Service.pdf).
 {% /callout %}
 
 ## Auto models
 
-Auto virtual models automatically select the best underlying model based on the task type. The selection is controlled by the `x-kilocode-mode` request header.
+Auto virtual models select an underlying model using tier-specific routing. Frontier uses the `x-kilocode-mode` request header. Efficient classifies task difficulty in session context and falls back to the API interface for its baseline model, Free uses deterministic affinity across available candidates, and Small uses account balance.
 
 {% callout type="info" title="Underlying models can change" %}
 The mappings below reflect the current routing. The underlying models behind each `kilo-auto/*` tier are updated server-side as better options become available or as providers change pricing and availability — the tier IDs themselves remain stable.
@@ -89,9 +91,9 @@ Highest performance and capability for any task. Frontier requests are sent with
 | `build`, `explore`, `code` | `anthropic/claude-sonnet-4.6` |
 | Default (no / unknown mode) | `anthropic/claude-sonnet-4.6` |
 
-### `kilo-auto/balanced`
+### `kilo-auto/efficient`
 
-Great balance of price and capability. The resolved model depends on the API interface used by the client.
+Session-aware routing that classifies each request by difficulty and routes to the cheapest model proven accurate enough for the task. When no confident routing decision can be made, requests fall back to a baseline model resolved by the API interface used by the client.
 
 | API interface | Resolved Model | Reasoning effort |
 |---|---|---|
@@ -104,7 +106,7 @@ Great balance of price and capability. The resolved model depends on the API int
 Free with limited capability. No credits required. The resolved model is selected dynamically per session from a curated set of available free models; the mapping updates server-side as free model availability shifts.
 
 {% callout type="warning" title="Data handling for Auto Free" %}
-Auto Free may route your requests to providers that log prompts and outputs and use them to improve their services — including NVIDIA's free endpoints, which are provided under the [NVIDIA API Trial Terms of Service](https://assets.ngc.nvidia.com/products/api-catalog/legal/NVIDIA%20API%20Trial%20Terms%20of%20Service.pdf) (trial use only, not for production or sensitive data). Do not submit personal or confidential data when using Auto Free.
+Auto Free may route your requests to providers that log prompts and outputs and use them to improve their services. Do not submit personal or confidential data when using Auto Free. In particular, it may route to NVIDIA's free endpoints (see NVIDIA Trial Terms of Service above).
 {% /callout %}
 
 ### `kilo-auto/small`
@@ -132,5 +134,5 @@ curl -X POST "https://api.kilo.ai/api/gateway/chat/completions" \
   -H "Authorization: Bearer $KILO_API_KEY" \
   -H "x-kilocode-mode: plan" \
   -H "Content-Type: application/json" \
-  -d '{"model": "kilo-auto/balanced", "messages": [{"role": "user", "content": "Design a database schema"}]}'
+  -d '{"model": "kilo-auto/efficient", "messages": [{"role": "user", "content": "Design a database schema"}]}'
 ```

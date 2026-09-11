@@ -2,12 +2,22 @@ package ai.kilocode.client.session.views
 
 import ai.kilocode.client.session.model.Content
 import ai.kilocode.client.session.model.Tool
+import ai.kilocode.client.session.model.ToolApproval
 import ai.kilocode.client.session.model.ToolExecState
 import ai.kilocode.client.session.model.toolKind
 import ai.kilocode.client.session.ui.style.SessionEditorStyle
 import ai.kilocode.client.session.ui.style.SessionUiStyle
-import ai.kilocode.client.session.views.base.SecondarySessionPartView
+import ai.kilocode.client.session.views.tool.ToolView
+import com.intellij.openapi.editor.DefaultLanguageHighlighterColors
+import com.intellij.openapi.util.Disposer
+import com.intellij.openapi.editor.EditorFactory
 import com.intellij.testFramework.fixtures.BasePlatformTestCase
+import com.intellij.ui.scale.JBUIScale
+import com.intellij.util.ui.JBUI
+import com.intellij.util.ui.UIUtil
+import java.awt.BorderLayout
+import java.awt.Container
+import javax.swing.JPanel
 import javax.swing.ScrollPaneConstants
 
 /**
@@ -15,6 +25,16 @@ import javax.swing.ScrollPaneConstants
  */
 @Suppress("UnstableApiUsage")
 class ToolViewTest : BasePlatformTestCase() {
+    private val views = mutableListOf<ToolView>()
+
+    override fun tearDown() {
+        try {
+            views.forEach(Disposer::dispose)
+            views.clear()
+        } finally {
+            super.tearDown()
+        }
+    }
 
     // ---- state icons ------
 
@@ -47,14 +67,14 @@ class ToolViewTest : BasePlatformTestCase() {
 
     fun `test title shown instead of name when title is set`() {
         val t = Tool("p1", "bash", toolKind("bash")).also { it.state = ToolExecState.RUNNING; it.title = "Install deps" }
-        val view = ToolView(t)
+        val view = track(ToolView(t))
         assertTrue(view.labelText().contains("Install deps"))
         assertTrue(view.labelText().contains("Shell"))
     }
 
     fun `test blank title falls back to tool name`() {
         val t = Tool("p1", "bash", toolKind("bash")).also { it.state = ToolExecState.COMPLETED; it.title = "   " }
-        val view = ToolView(t)
+        val view = track(ToolView(t))
         assertTrue(view.labelText().contains("Shell"))
     }
 
@@ -64,7 +84,7 @@ class ToolViewTest : BasePlatformTestCase() {
             it.output = "origin git@example.com:repo.git"
         }
 
-        val view = ToolView(t)
+        val view = track(ToolView(t))
 
         assertTrue(view.labelText().contains("Shell"))
         assertTrue(view.labelText().contains("View remotes"))
@@ -74,24 +94,42 @@ class ToolViewTest : BasePlatformTestCase() {
         assertFalse(view.isExpanded())
         assertTrue(view.hasToggle())
         assertFalse(view.bodyVisible())
-        assertTrue(view.bodyCreated())
+        assertFalse(view.bodyCreated())
         view.toggle()
         assertTrue(view.bodyVisible())
         assertTrue(view.bodyCreated())
     }
 
-    fun `test bash tool uses secondary chrome`() {
-        val view = ToolView(tool("p1", "bash", ToolExecState.COMPLETED))
-        val base: Any = view
+    fun `test bash tool editor highlights command text`() {
+        val t = tool("p1", "bash", ToolExecState.COMPLETED).also {
+            it.input = mapOf("command" to "git remote -v", "description" to "View remotes")
+            it.output = "origin git@example.com:repo.git"
+        }
+        val view = track(ToolView(t))
 
-        assertTrue(base is SecondarySessionPartView)
+        view.toggle()
+        val field = view.bodyEditor()!!
+        val editor = field.getEditor(true)!!
+        val spans = editor.markupModel.allHighlighters.map {
+            field.text.substring(it.startOffset, it.endOffset) to it.textAttributesKey
+        }
+
+        assertTrue(spans.contains("git" to DefaultLanguageHighlighterColors.KEYWORD))
+        assertTrue(spans.contains("-v" to DefaultLanguageHighlighterColors.KEYWORD))
     }
 
-    fun `test unknown tool uses secondary chrome`() {
-        val view = ToolView(tool("p1", "mystery", ToolExecState.COMPLETED))
-        val base: Any = view
+    fun `test tool draws no outline and separates the body with the standard gap`() {
+        val view = track(ToolView(tool("p1", "bash", ToolExecState.COMPLETED).also {
+            it.input = mapOf("command" to "pwd")
+            it.output = "/tmp"
+        }))
 
-        assertTrue(base is SecondarySessionPartView)
+        assertNull("collapsed card draws no outline", view.border)
+        view.toggle()
+        assertNull("expanded card draws no outline", view.border)
+        assertEquals(SessionUiStyle.View.contentGap(), (view.layout as BorderLayout).vgap)
+        view.toggle()
+        assertNull("collapsed card draws no outline", view.border)
     }
 
     fun `test bash toggle collapses and expands`() {
@@ -99,7 +137,7 @@ class ToolViewTest : BasePlatformTestCase() {
             it.input = mapOf("command" to "git log")
             it.output = "one\ntwo\nthree\nfour"
         }
-        val view = ToolView(t)
+        val view = track(ToolView(t))
 
         assertFalse(view.isExpanded())
         view.toggle()
@@ -108,12 +146,26 @@ class ToolViewTest : BasePlatformTestCase() {
         assertFalse(view.isExpanded())
     }
 
+    fun `test expanded tool shows approval footer`() {
+        val t = tool("p1", "bash", ToolExecState.COMPLETED).also {
+            it.input = mapOf("command" to "pwd")
+            it.output = "/tmp"
+            it.approval = ToolApproval(source = "global")
+        }
+        val view = track(ToolView(t))
+
+        view.toggle()
+        view.syncApprovalReason(true)
+
+        assertTrue(texts(view).any { it.contains("Auto-approved by your global config") })
+    }
+
     fun `test collapsed bash hides body`() {
         val t = tool("p1", "bash", ToolExecState.COMPLETED).also {
             it.input = mapOf("command" to "git log")
             it.output = "one\ntwo\nthree\nfour"
         }
-        val view = ToolView(t)
+        val view = track(ToolView(t))
 
         assertEquals("$ git log\n\none\ntwo\nthree\nfour", view.bodyText())
         assertTrue(view.hasToggle())
@@ -122,43 +174,44 @@ class ToolViewTest : BasePlatformTestCase() {
         assertTrue(view.bodyVisible())
     }
 
-    fun `test tool reuses eager body after collapse and expand`() {
+    fun `test tool creates lazy body once after collapse and expand`() {
         val t = tool("p1", "bash", ToolExecState.COMPLETED).also {
             it.input = mapOf("command" to "pwd")
             it.output = "/tmp"
         }
-        val view = ToolView(t)
+        val view = track(ToolView(t))
 
-        assertTrue(view.bodyCreated())
+        assertFalse(view.bodyCreated())
         view.toggle()
-        val font = view.bodyFont()
+        val body = view.bodyEditor()
+        assertNotNull(body)
         view.toggle()
         view.toggle()
 
-        assertSame(font, view.bodyFont())
+        assertSame(body, view.bodyEditor())
         assertTrue(view.bodyVisible())
     }
 
-    fun `test collapsed update keeps eager tool body detached`() {
-        val view = ToolView(tool("p1", "bash", ToolExecState.RUNNING).also {
+    fun `test collapsed update keeps lazy tool body uncreated`() {
+        val view = track(ToolView(tool("p1", "bash", ToolExecState.RUNNING).also {
             it.input = mapOf("command" to "pwd")
             it.output = "/tmp"
-        })
+        }))
 
         view.update(tool("p1", "bash", ToolExecState.COMPLETED).also {
             it.input = mapOf("command" to "pwd")
             it.output = "/home"
         })
 
-        assertTrue(view.bodyCreated())
+        assertFalse(view.bodyCreated())
         assertEquals("$ pwd\n\n/home", view.bodyText())
     }
 
     fun `test collapsed update after first expand reuses tool body text`() {
-        val view = ToolView(tool("p1", "bash", ToolExecState.RUNNING).also {
+        val view = track(ToolView(tool("p1", "bash", ToolExecState.RUNNING).also {
             it.input = mapOf("command" to "pwd")
             it.output = "/tmp"
-        })
+        }))
 
         view.toggle()
         view.toggle()
@@ -177,7 +230,7 @@ class ToolViewTest : BasePlatformTestCase() {
             it.input = mapOf("command" to "pwd")
             it.output = "/tmp"
         }
-        val view = ToolView(t)
+        val view = track(ToolView(t))
 
         assertFalse(view.isExpanded())
         assertTrue(view.hasToggle())
@@ -191,7 +244,7 @@ class ToolViewTest : BasePlatformTestCase() {
             it.input = mapOf("path" to "/tmp", "pattern" to "**/*.kt")
             it.output = "/tmp/A.kt"
         }
-        val view = ToolView(t)
+        val view = track(ToolView(t))
 
         assertTrue(view.labelText().contains("Glob"))
         assertTrue(view.labelText().contains("/tmp"))
@@ -205,18 +258,21 @@ class ToolViewTest : BasePlatformTestCase() {
 
     fun `test bash output uses editor font settings`() {
         val style = SessionEditorStyle.current()
-        val view = ToolView(tool("p1", "bash", ToolExecState.COMPLETED))
+        val view = track(ToolView(tool("p1", "bash", ToolExecState.COMPLETED).also { it.output = "done" }))
+        view.toggle()
 
-        assertEditorFont(view.bodyFont(), style)
+        assertCodeFont(view.bodyFont(), style)
         assertFalse(view.bodyEditable())
         assertFalse(view.bodyCaretVisible())
-        assertTrue(view.bodyWrap())
-        assertEquals(ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER, view.horizontalPolicy())
+        assertFalse(view.bodyWrap())
+        assertNotNull(view.bodyEditor())
+        assertEquals(ScrollPaneConstants.HORIZONTAL_SCROLLBAR_AS_NEEDED, view.horizontalPolicy())
+        assertEquals(ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED, view.verticalPolicy())
     }
 
     fun `test tool header uses editor-derived fonts`() {
         val style = SessionEditorStyle.current()
-        val view = ToolView(tool("p1", "bash", ToolExecState.COMPLETED))
+        val view = track(ToolView(tool("p1", "bash", ToolExecState.COMPLETED).also { it.output = "done" }))
 
         assertEditorFont(view.titleFont(), style)
         assertTrue(view.titleFont().isBold)
@@ -224,13 +280,22 @@ class ToolViewTest : BasePlatformTestCase() {
         assertSmallEditorFont(view.stateFont(), style)
     }
 
+    fun `test tool header uses standard layout gap`() {
+        val view = track(ToolView(tool("p1", "bash", ToolExecState.COMPLETED).also { it.output = "done" }))
+
+        assertEquals(JBUI.scale(SessionUiStyle.View.Layout.GAP), headerGap(view))
+    }
+
     fun `test applyStyle updates tool fonts in place`() {
         val view = ToolView(tool("p1", "bash", ToolExecState.COMPLETED))
         val style = SessionEditorStyle.create(family = "Courier New", size = 25)
+        view.toggle()
+        val editor = view.bodyEditor()
 
         view.applyStyle(style)
 
-        assertEditorFont(view.bodyFont(), style)
+        assertSame(editor, view.bodyEditor())
+        assertCodeFont(view.bodyFont(), style)
         assertEditorFont(view.titleFont(), style)
         assertTrue(view.titleFont().isBold)
         assertSmallEditorFont(view.subtitleFont(), style)
@@ -243,7 +308,7 @@ class ToolViewTest : BasePlatformTestCase() {
             it.output = "/tmp"
         }
 
-        val view = ToolView(t)
+        val view = track(ToolView(t))
 
         assertEquals(1, view.controlCount())
     }
@@ -253,12 +318,37 @@ class ToolViewTest : BasePlatformTestCase() {
             it.input = mapOf("command" to "log")
             it.output = (1..40).joinToString("\n") { line -> "line $line" }
         }
-        val view = ToolView(t)
+        val view = track(ToolView(t))
 
         view.toggle()
 
         assertEquals(15, view.bodyMaxRows())
         assertTrue(view.preferredSize.height > 0)
+    }
+
+    fun `test expanded body height ignores user scale factor`() {
+        // The tool body height comes from the editor line height, which tracks the IDE
+        // scale (editor font), not the JBUI user scale factor. Raising the user scale
+        // factor alone must not change the body height; a double-scaling regression would.
+        val original = JBUIScale.scale(1f)
+        val t = tool("p1", "bash", ToolExecState.COMPLETED).also {
+            it.input = mapOf("command" to "log")
+            it.output = (1..6).joinToString("\n") { line -> "line $line" }
+        }
+        try {
+            JBUIScale.setUserScaleFactorForTest(1f)
+            val view = track(ToolView(t))
+            view.toggle()
+            val before = view.bodyEditor()!!.preferredSize.height
+
+            JBUIScale.setUserScaleFactorForTest(2f)
+            view.applyStyle(SessionEditorStyle.current())
+            val after = view.bodyEditor()!!.preferredSize.height
+
+            assertEquals(before, after)
+        } finally {
+            JBUIScale.setUserScaleFactorForTest(original)
+        }
     }
 
     fun `test large tool output is truncated in preview`() {
@@ -268,7 +358,7 @@ class ToolViewTest : BasePlatformTestCase() {
             it.output = out
         }
 
-        val view = ToolView(t)
+        val view = track(ToolView(t))
         view.toggle()
 
         assertEquals("$ log\n\n$out", view.bodyText())
@@ -282,7 +372,7 @@ class ToolViewTest : BasePlatformTestCase() {
             it.output = out
         }
 
-        val view = ToolView(t)
+        val view = track(ToolView(t))
         view.toggle()
 
         assertEquals(out, view.bodyText())
@@ -320,18 +410,80 @@ class ToolViewTest : BasePlatformTestCase() {
         assertEquals("part99", view.contentId)
     }
 
+    // ---- header popup ------
+
+    fun `test tool header popup previews output when collapsed`() {
+        val view = track(ToolView(tool("g1", "grep", ToolExecState.COMPLETED).also { it.output = "match one\nmatch two" }))
+        val req = view.headerPopup()
+        assertNotNull(req)
+        val body = req!!.build()
+        try {
+            val editors = popupEditors(body.component)
+            editors.forEach { it.getEditor(true) }
+            assertEquals(listOf("match one\nmatch two"), editors.map { it.text })
+            assertTrue(body.component.preferredSize.height in 1..JBUI.scale(SessionUiStyle.View.Popup.MAX_HEIGHT))
+        } finally {
+            Disposer.dispose(body.disposable)
+        }
+    }
+
+    fun `test tool header popup is absent when empty or expanded`() {
+        val empty = track(ToolView(tool("g2", "grep", ToolExecState.COMPLETED)))
+        assertNull(empty.headerPopup())
+
+        val view = track(ToolView(tool("g3", "grep", ToolExecState.COMPLETED).also { it.output = "hit" }))
+        assertNotNull(view.headerPopup())
+        view.toggle()
+        assertNull(view.headerPopup())
+    }
+
+    fun `test tool header popup disposes editor after hide and churn`() {
+        val base = EditorFactory.getInstance().allEditors.size
+        val view = track(ToolView(tool("g4", "grep", ToolExecState.COMPLETED).also { it.output = "hit" }))
+        repeat(20) {
+            val body = view.headerPopup()!!.build()
+            popupEditors(body.component).forEach { it.getEditor(true) }
+            Disposer.dispose(body.disposable)
+        }
+        UIUtil.dispatchAllInvocationEvents()
+        assertEquals(base, EditorFactory.getInstance().allEditors.size)
+    }
+
     // ---- helpers ------
 
     private fun tool(id: String, name: String, state: ToolExecState, title: String? = null): Tool =
         Tool(id, name, toolKind(name)).also { it.state = state; it.title = title }
 
+    private fun track(view: ToolView): ToolView {
+        views.add(view)
+        return view
+    }
+
     private fun assertEditorFont(font: java.awt.Font, style: SessionEditorStyle) {
-        assertEquals(style.editorFamily, font.name)
+        assertEquals(style.transcriptFont.name, font.name)
+        assertEquals(style.editorSize, font.size)
+    }
+
+    private fun assertCodeFont(font: java.awt.Font, style: SessionEditorStyle) {
+        assertEquals(style.editorFont.name, font.name)
         assertEquals(style.editorSize, font.size)
     }
 
     private fun assertSmallEditorFont(font: java.awt.Font, style: SessionEditorStyle) {
-        assertEquals(style.editorFamily, font.name)
+        assertEquals(style.smallEditorFont.name, font.name)
         assertTrue(font.size < style.editorSize)
     }
+
+    private fun headerGap(view: ToolView): Int {
+        val row = view.components.filterIsInstance<JPanel>().single()
+        val header = (row.layout as BorderLayout).getLayoutComponent(BorderLayout.CENTER) as JPanel
+        return (header.layout as BorderLayout).hgap
+    }
+
+    private fun texts(root: Container): List<String> = root.components.flatMap { child ->
+        val own = (child as? javax.swing.JLabel)?.text?.let(::listOf) ?: emptyList()
+        val nested = (child as? Container)?.let(::texts) ?: emptyList()
+        own + nested
+    }
+
 }

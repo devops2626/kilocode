@@ -3,6 +3,7 @@
 
 import { For, Show, createEffect, createMemo, createSignal, on, onCleanup } from "solid-js"
 import { Button } from "@kilocode/kilo-ui/button"
+import { IconButton } from "@kilocode/kilo-ui/icon-button"
 import { Spinner } from "@kilocode/kilo-ui/spinner"
 import { createAutoScroll } from "@kilocode/kilo-ui/hooks"
 import { useClaw } from "../context/claw"
@@ -10,6 +11,7 @@ import { useKiloClawLanguage } from "../context/language"
 import { MessageBubble } from "./MessageBubble"
 import { computeBotDisplay, useNowTicker } from "./botStatus"
 import type { Message } from "../lib/types"
+import { isEnterKeyCommitNotIme } from "../../src/utils/ime-enter"
 
 export function MessageArea() {
   const claw = useClaw()
@@ -150,7 +152,7 @@ export function MessageArea() {
   }
 
   const onKeyDown = (e: KeyboardEvent) => {
-    if (e.key === "Enter" && !e.shiftKey) {
+    if (isEnterKeyCommitNotIme(e) && !e.shiftKey) {
       e.preventDefault()
       submit()
     }
@@ -271,15 +273,16 @@ export function MessageArea() {
             </div>
           </div>
           <Show when={showScrollButton()}>
-            <button
-              type="button"
+            <IconButton
+              icon="arrow-down-to-line"
+              variant="primary"
+              size="large"
+              shape="circle"
               class="kiloclaw-scrollbtn"
               onClick={scrollToBottom}
               aria-label="Scroll to latest message"
               title="Scroll to bottom"
-            >
-              ↓
-            </button>
+            />
           </Show>
         </div>
 
@@ -302,14 +305,13 @@ export function MessageArea() {
             <div class="kiloclaw-reply-preview">
               <span class="kiloclaw-reply-preview-label">{t("kiloClaw.message.replyTo")}</span>
               <span class="kiloclaw-reply-preview-text">{replyText(r())}</span>
-              <button
-                type="button"
-                class="kiloclaw-iconbtn-sm"
+              <IconButton
+                icon="close-small"
+                variant="ghost"
+                size="small"
                 onClick={() => setReplyingTo(null)}
                 aria-label={t("kiloClaw.message.cancelReply")}
-              >
-                ×
-              </button>
+              />
             </div>
           )}
         </Show>

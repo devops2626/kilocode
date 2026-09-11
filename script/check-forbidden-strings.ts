@@ -27,11 +27,13 @@ const forbidden: { pattern: string; reason: string; allow?: string[] }[] = [
     allow: [
       "AGENTS.md",
       "README.md",
+      "translations/README.",
       ".opencode/glossary/",
       "packages/kilo-vscode/AGENTS.md",
       "packages/kilo-docs/source-links.md",
       "patches/",
       "script/upstream/",
+      "translations/",
     ],
   },
   {
@@ -41,6 +43,9 @@ const forbidden: { pattern: string; reason: string; allow?: string[] }[] = [
   },
   { pattern: `"HTTP-Referer": "https://opencode.ai/"`, reason: "attributes outbound LLM traffic to upstream" },
   { pattern: `"http-referer": "https://opencode.ai/"`, reason: "attributes outbound LLM traffic to upstream" },
+  { pattern: "Tell OpenCode what to do differently", reason: "direct-mode permission UI uses upstream branding" },
+  { pattern: "until OpenCode is restarted", reason: "permission copy uses upstream branding" },
+  { pattern: "OpenCode's managed cache", reason: "Scout tool description uses upstream branding" },
 
   // Candidates -- enable once the underlying call sites have been rebranded.
   // Each one currently fires on real leaks; uncomment after fixing the listed

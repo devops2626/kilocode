@@ -2,16 +2,19 @@
 // the same parent assistant message. Without the internal lock, parallel
 // subagent completions race on read-modify-write and lose deltas (#6321).
 
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { afterEach, describe, expect } from "bun:test"
-import { Effect, Layer } from "effect"
+import { Effect } from "effect"
 import { Bus } from "../../src/bus"
 import * as CrossSpawnSpawner from "@opencode-ai/core/cross-spawn-spawner"
 import { KiloCostPropagation } from "../../src/kilocode/session/cost-propagation"
-import { Instance } from "../../src/project/instance"
-import { ProviderID, ModelID } from "../../src/provider/schema"
+import { ProviderV2 } from "@opencode-ai/core/provider"
+import { ModelV2 } from "@opencode-ai/core/model"
+import { SessionProjector } from "@opencode-ai/core/session/projector"
 import { Session } from "../../src/session/session"
 import { MessageV2 } from "../../src/session/message-v2"
 import { MessageID } from "../../src/session/schema"
+import { Database } from "@opencode-ai/core/database/database"
 import * as Log from "@opencode-ai/core/util/log"
 import { disposeAllInstances, provideTmpdirInstance } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
@@ -23,11 +26,22 @@ afterEach(async () => {
 })
 
 const ref = {
-  providerID: ProviderID.make("test"),
-  modelID: ModelID.make("test-model"),
+  providerID: ProviderV2.ID.make("test"),
+  modelID: ModelV2.ID.make("test-model"),
 }
 
-const it = testEffect(Layer.mergeAll(Session.defaultLayer, Bus.layer, CrossSpawnSpawner.defaultLayer))
+const it = testEffect(
+  LayerNode.compile(
+    LayerNode.group([
+      Session.node,
+      SessionProjector.node,
+      MessageV2.node,
+      Bus.node,
+      Database.node,
+      CrossSpawnSpawner.node,
+    ]),
+  ),
+)
 
 const seed = Effect.fn("CostPropagationTest.seed")(function* () {
   const sessions = yield* Session.Service
@@ -69,7 +83,7 @@ describe("KiloCostPropagation.propagate", () => {
           deltas.map((d) => KiloCostPropagation.propagate(sessions, chat.id, assistant.id, d)),
           { concurrency: "unbounded" },
         )
-        const parent = yield* Effect.sync(() => MessageV2.get({ sessionID: chat.id, messageID: assistant.id }))
+        const parent = yield* MessageV2.get({ sessionID: chat.id, messageID: assistant.id })
         expect(parent.info.role).toBe("assistant")
         if (parent.info.role !== "assistant") return
         const total = deltas.reduce((a, b) => a + b, 0)
@@ -85,7 +99,7 @@ describe("KiloCostPropagation.propagate", () => {
         const { chat, assistant } = yield* seed()
         yield* KiloCostPropagation.propagate(sessions, chat.id, assistant.id, 0)
         yield* KiloCostPropagation.propagate(sessions, chat.id, assistant.id, -1.5)
-        const parent = yield* Effect.sync(() => MessageV2.get({ sessionID: chat.id, messageID: assistant.id }))
+        const parent = yield* MessageV2.get({ sessionID: chat.id, messageID: assistant.id })
         if (parent.info.role !== "assistant") return
         expect(parent.info.cost).toBe(0)
       }),

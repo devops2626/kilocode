@@ -1,33 +1,24 @@
-import { BusEvent } from "@/bus/bus-event"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+import path from "path"
 import { InstanceState } from "@/effect/instance-state"
 import { EffectBridge } from "@/effect/bridge"
-import type { InstanceContext } from "@/project/instance"
-import { SessionID, MessageID } from "@/session/schema"
+import type { InstanceContext } from "@/project/instance-context"
 import { Effect, Layer, Context, Schema } from "effect"
-import z from "zod"
-import { zod, ZodOverride } from "@/util/effect-zod"
-import { withStatics } from "@/util/schema"
 import { Config } from "@/config/config"
 import { MCP } from "../mcp"
 import { Skill } from "../skill"
-import { localReviewCommand, localReviewUncommittedCommand } from "@/kilocode/review/command" // kilocode_change
+import { legacyReviewCommand, reviewCommand } from "@/kilocode/review/command" // kilocode_change
+import { apply as applyOverride, type Override } from "@/kilocode/command/override" // kilocode_change
 import PROMPT_INITIALIZE from "./template/initialize.txt"
-import PROMPT_REVIEW from "./template/review.txt"
+import { LegacyEvent } from "@opencode-ai/schema/legacy-event"
+import { SessionResume } from "@/kilocode/session-resume" // kilocode_change
 
 type State = {
   commands: Record<string, Info>
 }
 
 export const Event = {
-  Executed: BusEvent.define(
-    "command.executed",
-    Schema.Struct({
-      name: Schema.String,
-      sessionID: SessionID,
-      arguments: Schema.String,
-      messageID: MessageID,
-    }),
-  ),
+  Executed: LegacyEvent.CommandExecuted,
 }
 
 export const Info = Schema.Struct({
@@ -35,16 +26,15 @@ export const Info = Schema.Struct({
   description: Schema.optional(Schema.String),
   agent: Schema.optional(Schema.String),
   model: Schema.optional(Schema.String),
+  variant: Schema.optional(Schema.String), // kilocode_change
   source: Schema.optional(Schema.Literals(["command", "mcp", "skill"])),
+  trusted: Schema.optional(Schema.Boolean), // kilocode_change - skill-sourced templates only run `!`cmd`` shell when trusted
   // Some command templates are lazy promises from MCP prompt resolution.
-  template: Schema.Unknown.annotate({ [ZodOverride]: z.promise(z.string()).or(z.string()) }),
+  template: Schema.Unknown,
   subtask: Schema.optional(Schema.Boolean),
   hints: Schema.Array(Schema.String),
-})
-  .annotate({ identifier: "Command" })
-  .pipe(withStatics((s) => ({ zod: zod(s) })))
+}).annotate({ identifier: "Command" })
 
-// for some reason zod is inferring `string` for z.promise(z.string()).or(z.string()) so we have to manually override it
 export type Info = Omit<Schema.Schema.Type<typeof Info>, "template"> & { template: Promise<string> | string }
 
 export function hints(template: string) {
@@ -60,10 +50,6 @@ export function hints(template: string) {
 export const Default = {
   INIT: "init",
   REVIEW: "review",
-  // kilocode_change start
-  LOCAL_REVIEW: "local-review",
-  LOCAL_REVIEW_UNCOMMITTED: "local-review-uncommitted",
-  // kilocode_change end
 } as const
 
 export interface Interface {
@@ -71,9 +57,42 @@ export interface Interface {
   readonly list: () => Effect.Effect<Info[]>
 }
 
+// kilocode_change start - skills can share names with slash commands
+function fromSkill(item: Skill.Info, dir?: string): Info {
+  return {
+    name: item.name,
+    description: item.description,
+    source: "skill",
+    trusted: item.trusted === true,
+    get template() {
+      if (!dir) return item.content
+      return [
+        item.content,
+        "",
+        `Base directory for this skill: ${dir}`,
+        "Relative paths in this skill (e.g., scripts/, references/) are relative to this base directory.",
+      ].join("\n")
+    },
+    hints: [],
+  }
+}
+
+function directory(item: Skill.Info) {
+  return item.location === "<built-in>" ? undefined : path.dirname(item.location)
+}
+
+function skillName(name: string) {
+  return name.endsWith(":skill") ? name.slice(0, -6) : undefined
+}
+
+function mcpName(name: string) {
+  return name.endsWith(":mcp") ? name.slice(0, -4) : undefined
+}
+// kilocode_change end
+
 export class Service extends Context.Service<Service, Interface>()("@opencode/Command") {}
 
-export const layer = Layer.effect(
+const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const config = yield* Config.Service
@@ -94,38 +113,30 @@ export const layer = Layer.effect(
         },
         hints: hints(PROMPT_INITIALIZE),
       }
-      commands[Default.REVIEW] = {
-        name: Default.REVIEW,
-        description: "review changes [commit|branch|pr], defaults to uncommitted",
-        source: "command",
-        get template() {
-          return PROMPT_REVIEW.replace("${path}", ctx.worktree)
-        },
-        subtask: true,
-        hints: hints(PROMPT_REVIEW),
-      }
-
       // kilocode_change start
-      commands[Default.LOCAL_REVIEW] = localReviewCommand()
-      commands[Default.LOCAL_REVIEW_UNCOMMITTED] = localReviewUncommittedCommand()
+      commands[Default.REVIEW] = reviewCommand()
+      commands.goal = {
+        name: "goal",
+        description: "Keep working toward a session goal. /goal <objective> or pause, resume, clear",
+        source: "command",
+        template: "$ARGUMENTS",
+        hints: ["<objective | pause | resume | clear>"],
+      }
+      commands["resume-claude"] = SessionResume.resumeClaude
+      commands["resume-codex"] = SessionResume.resumeCodex
       // kilocode_change end
 
+      // kilocode_change start - defer partial overrides until all command sources are registered
+      const overrides: Array<{ name: string; command: Override }> = []
       for (const [name, command] of Object.entries(cfg.command ?? {})) {
-        commands[name] = {
-          name,
-          agent: command.agent,
-          model: command.model,
-          description: command.description,
-          source: "command",
-          get template() {
-            return command.template
-          },
-          subtask: command.subtask,
-          hints: hints(command.template),
-        }
+        if (name === "goal")
+          throw new Error("The /goal command is reserved for session goals. Rename the custom command.")
+        if (!applyOverride(commands, name, command, hints)) overrides.push({ name, command }) // kilocode_change
       }
+      // kilocode_change end
 
       for (const [name, prompt] of Object.entries(yield* mcp.prompts())) {
+        if (name === "goal") throw new Error("The /goal command is reserved for session goals. Rename the MCP prompt.") // kilocode_change
         commands[name] = {
           name,
           source: "mcp",
@@ -156,16 +167,33 @@ export const layer = Layer.effect(
 
       for (const item of yield* skill.all()) {
         if (commands[item.name]) continue
-        commands[item.name] = {
-          name: item.name,
-          description: item.description,
-          source: "skill",
-          get template() {
-            return item.content
-          },
-          hints: [],
-        }
+        commands[item.name] = fromSkill(item, directory(item)) // kilocode_change
       }
+
+      // kilocode_change start - apply deferred overrides to their registered source
+      for (const item of overrides) {
+        const skillTarget = skillName(item.name)
+        if (skillTarget) {
+          const found = yield* skill.get(skillTarget)
+          if (found) {
+            if (commands[skillTarget]?.source !== "skill") {
+              commands[item.name] = fromSkill(found, directory(found))
+              applyOverride(commands, item.name, item.command, hints) // kilocode_change
+            } else {
+              applyOverride(commands, skillTarget, item.command, hints) // kilocode_change
+            }
+          }
+          continue
+        }
+        const mcpTarget = mcpName(item.name)
+        if (mcpTarget) {
+          if (commands[mcpTarget]?.source !== "mcp") continue
+          applyOverride(commands, mcpTarget, item.command, hints) // kilocode_change
+          continue
+        }
+        applyOverride(commands, item.name, item.command, hints) // kilocode_change
+      }
+      // kilocode_change end
 
       return {
         commands,
@@ -176,22 +204,48 @@ export const layer = Layer.effect(
 
     const get = Effect.fn("Command.get")(function* (name: string) {
       const s = yield* InstanceState.get(state)
-      return s.commands[name]
+      const exact = s.commands[name] // kilocode_change
+      if (exact) return exact // kilocode_change
+      const alias = legacyReviewCommand(name) // kilocode_change
+      if (alias) return alias // kilocode_change
+
+      // kilocode_change start
+      const target = skillName(name)
+      if (target) {
+        const exact = s.commands[target]
+        if (exact?.source === "skill") return exact
+        const item = yield* skill.get(target)
+        if (item) return fromSkill(item, directory(item))
+        return undefined
+      }
+      // kilocode_change end
+      // kilocode_change start
+      const prompt = mcpName(name)
+      if (prompt) {
+        const cmd = s.commands[prompt]
+        return cmd?.source === "mcp" ? cmd : undefined
+      }
+      // kilocode_change end
+      return undefined // kilocode_change
     })
 
+    // kilocode_change start
     const list = Effect.fn("Command.list")(function* () {
       const s = yield* InstanceState.get(state)
-      return Object.values(s.commands)
+      const result = Object.values(s.commands)
+      const names = new Set(result.map((item) => item.name))
+      for (const item of yield* skill.all()) {
+        if (s.commands[item.name]?.source === "skill" || s.commands[`${item.name}:skill`]?.source === "skill") continue
+        if (names.has(item.name)) result.push(fromSkill(item, directory(item)))
+      }
+      return result
     })
+    // kilocode_change end
 
     return Service.of({ get, list })
   }),
 )
 
-export const defaultLayer = layer.pipe(
-  Layer.provide(Config.defaultLayer),
-  Layer.provide(MCP.defaultLayer),
-  Layer.provide(Skill.defaultLayer),
-)
+export const node = LayerNode.make({ service: Service, layer: layer, deps: [Config.node, MCP.node, Skill.node] })
 
 export * as Command from "."

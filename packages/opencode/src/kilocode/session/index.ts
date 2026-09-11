@@ -1,22 +1,25 @@
-// kilocode_change - new file
-import { remapChildren as _remapChildren } from "./fork"
+import { prepareForkedPart as _prepareForkedPart, remapChildren as _remapChildren } from "./fork"
 import z from "zod"
 import { Cause, Effect, Schema } from "effect"
-import { BusEvent } from "@/bus/bus-event"
+import { Bus } from "@/bus"
+import { Instance, type InstanceContext } from "@/kilocode/instance"
 import { EffectBridge } from "@/effect/bridge"
 import { Session } from "@/session/session"
 import { MessageID, SessionID } from "@/session/schema"
-import { fn } from "@/util/fn"
-import { Database, eq, and, gte, isNull, desc, like, inArray, lt, or } from "@/storage/db"
-import type { SQL } from "@/storage/db"
-import { ProjectTable } from "@/project/project.sql"
-import { ProjectID } from "@/project/schema"
+import { and, desc, eq, gte, inArray, isNull, like, lt, or, type SQL } from "drizzle-orm"
+import { Database } from "@opencode-ai/core/database/database"
+import { ProjectTable } from "@opencode-ai/core/project/sql"
+import { ProjectV2 } from "@opencode-ai/core/project"
 import { Filesystem } from "@/util/filesystem"
-import { SessionTable } from "@/session/session.sql"
+import { SessionTable } from "@opencode-ai/core/session/sql"
 import * as Log from "@opencode-ai/core/util/log"
-import type { LanguageModelUsage, ProviderMetadata } from "ai"
+import type { ProviderMetadata, Usage } from "@opencode-ai/llm"
 import type { Provider } from "@/provider/provider"
 import { ENV_FEATURE } from "@kilocode/kilo-gateway"
+import { existsSync } from "fs"
+import path from "path"
+import { iife } from "@/util/iife"
+import { KiloSessionEvent, type KiloSessionCloseReason } from "./event"
 
 export namespace KiloSession {
   const log = Log.create({ service: "session.kilo" })
@@ -25,25 +28,38 @@ export namespace KiloSession {
   // Events
   // ---------------------------------------------------------------------------
 
-  const CloseReasonSchema = Schema.Literals(["completed", "error", "interrupted"])
+  export const Event = KiloSessionEvent
+  export type CloseReason = KiloSessionCloseReason
 
-  export const Event = {
-    TurnOpen: BusEvent.define(
-      "session.turn.open",
-      Schema.Struct({
-        sessionID: SessionID,
-      }),
-    ),
-    TurnClose: BusEvent.define(
-      "session.turn.close",
-      Schema.Struct({
-        sessionID: SessionID,
-        reason: CloseReasonSchema,
-      }),
-    ),
+  // Turn events stay on the legacy Bus (memory/turn.ts subscribes there), but the publish
+  // lives here so the upstream-shaped session/prompt.ts does not take a legacy Bus dependency.
+  export const publishTurnOpen = (input: { sessionID: SessionID }) =>
+    Effect.promise(() => Bus.publish(Instance.current, Event.TurnOpen, input))
+
+  export const publishTurnClose = (input: { sessionID: SessionID; parentID?: SessionID; reason: CloseReason }) =>
+    Effect.promise(() => Bus.publish(Instance.current, Event.TurnClose, input))
+
+  // FIFO snapshot of the per-session waiting list.
+  // Emitted by KiloSessionPromptQueue on every transition that changes the set
+  // of queued (not-yet-running) user messages.
+  export const publishQueueChanged = (input: { sessionID: SessionID; queued: MessageID[] }) =>
+    Effect.promise(() => Bus.publish(Instance.current, Event.QueueChanged, input))
+
+  // Synchronous, fire-and-forget variant for callers that run outside an Effect
+  // context (e.g. KiloSessionPromptQueue transitions, which fire from inside
+  // Effect.sync blocks). Swallows errors so a transient context loss never
+  // breaks the queue.
+  export function publishQueueChangedAsync(input: { sessionID: SessionID; queued: MessageID[] }) {
+    const ctx = iife((): InstanceContext | undefined => {
+      try {
+        return Instance.current
+      } catch {
+        return undefined
+      }
+    })
+    if (!ctx) return
+    Bus.publish(ctx, Event.QueueChanged, input).catch((err) => log.warn("queue changed publish failed", { err }))
   }
-
-  export type CloseReason = Schema.Schema.Type<typeof CloseReasonSchema>
 
   // ---------------------------------------------------------------------------
   // Per-session platform override (telemetry attribution)
@@ -82,6 +98,10 @@ export namespace KiloSession {
     return roots.get(id) ?? id
   }
 
+  export function resolveParent(id: string): string | undefined {
+    return parents.get(id)
+  }
+
   export function featureForPlatform(platform: string | undefined): string | undefined {
     switch (platform) {
       case "agent-manager":
@@ -112,28 +132,40 @@ export namespace KiloSession {
   // Project family resolution (worktree-aware)
   // ---------------------------------------------------------------------------
 
-  export function family(id: string): string[] {
-    const row = Database.use((db) =>
-      db
-        .select({ worktree: ProjectTable.worktree })
-        .from(ProjectTable)
-        .where(eq(ProjectTable.id, ProjectID.make(id)))
-        .get(),
-    )
-    const root = row?.worktree ? Filesystem.resolve(row.worktree) : undefined
-    if (!root || root === "/") return [id]
-    const ids = Database.use((db) =>
-      db
-        .select({ id: ProjectTable.id })
-        .from(ProjectTable)
-        .where(eq(ProjectTable.worktree, root))
-        .all()
-        .map((item) => item.id),
-    )
-    return ids.length ? ids : [id]
+  function family(
+    id: string,
+    rows: Array<Pick<typeof ProjectTable.$inferSelect, "id" | "worktree" | "sandboxes">>,
+    directories: string[] = [],
+  ): string[] {
+    const resolve = (dir: string) => {
+      try {
+        return Filesystem.resolve(dir)
+      } catch (err) {
+        const code = typeof err === "object" && err !== null && "code" in err ? err.code : undefined
+        if (code !== "EPERM" && code !== "EACCES") throw err
+        log.warn("Ignoring inaccessible saved project directory", { dir, code })
+        return undefined
+      }
+    }
+    const current = rows.find((row) => row.id === id)
+    const root = current?.worktree ? resolve(current.worktree) : undefined
+    // Combine the stored root with Git's current sibling worktrees.
+    const roots = new Set([...(root && root !== "/" ? [root] : []), ...directories.map(Filesystem.resolve)])
+    if (roots.size === 0) return [id]
+
+    // Match both each project's recorded root and its saved worktrees.
+    const ids = rows.flatMap((row) => {
+      const match = [row.worktree, ...row.sandboxes].some((dir) => {
+        const value = resolve(dir)
+        return value !== undefined && roots.has(value)
+      })
+      return match ? [row.id] : []
+    })
+    // Always keep the requested ID and remove duplicates.
+    return [...new Set([id, ...ids])]
   }
 
-  export function filters(input: { projectID: ProjectID; directory?: string }): SQL[] {
+  export function filters(input: { projectID: ProjectV2.ID; directory?: string }): SQL[] {
     const dir = input.directory ? Filesystem.resolve(input.directory) : undefined
     if (!dir) return [eq(SessionTable.project_id, input.projectID)]
     return [
@@ -151,29 +183,31 @@ export namespace KiloSession {
    *
    * Supports the following internal transports:
    *   1. OpenRouter chat completions  -> `metadata.openrouter.usage.cost`
-   *                                      (`costDetails.upstreamInferenceCost` for Kilo)
+   *                                      (`costDetails.upstreamInferenceCost` for Kilo
+   *                                      and for BYOK-routed requests)
    *   2. Anthropic Messages or OpenAI Responses via OpenRouter
-   *                                   -> `usage.raw.cost_details.upstream_inference_cost`
-   *      (the `@ai-sdk/anthropic` and `@ai-sdk/openai` providers both surface the verbatim
-   *      provider usage object on `LanguageModelUsage.raw`, so OpenRouter's upstream
-   *      inference cost lands there with snake_case preserved)
+   *                                   -> `usage.providerMetadata.aiSdk.cost_details`
    *   3. Anthropic Messages or OpenAI Responses via Vercel AI Gateway
-   *                                   -> `metadata.gateway.marketCost` (defensive: the
-   *      gateway emits this in the SSE `provider_metadata` field, which the current AI SDK
-   *      providers drop before they reach this layer)
+   *                                   -> `metadata.gateway.marketCost`
    *
    * Kilo does not charge end users a per-request fee, so for the Kilo provider the
    * top-level `cost` field (the gateway/marketplace fee) would understate the user's
    * actual upstream spend. Always prefer the upstream/market cost when present.
    *
+   * For OpenRouter BYOK routing, `cost` is what OpenRouter charged the account ($0,
+   * or only its routing fee) and `upstreamInferenceCost` is billed to the user's own
+   * key. True spend is the sum. A non-BYOK response always bills the account at least
+   * the upstream cost, so summing only when upstream exceeds the billed amount never
+   * changes non-BYOK sessions.
+   *
    * Returns `undefined` when no provider cost is available, so the caller
    * should fall back to the standard token-based calculation.
    *
-   * Reference: https://openrouter.ai/docs/use-cases/usage-accounting
+   * Reference: https://openrouter.ai/docs/cookbook/administration/usage-accounting
    */
   export function providerCost(input: {
     metadata?: ProviderMetadata
-    usage?: LanguageModelUsage
+    usage?: Usage
     provider?: Provider.Info
     providerID: string
   }): number | undefined {
@@ -194,32 +228,29 @@ export namespace KiloSession {
       const regular = num(orUsage.cost)
       // Kilo doesn't charge a fee on top of the upstream inference cost, so for Kilo
       // prefer the upstream cost (the user's true spend). For the OpenRouter provider
-      // itself, the regular `cost` field is what the user is billed.
-      const cost = isKilo && upstream !== undefined ? upstream : regular
-      if (cost !== undefined) return cost
+      // itself, the regular `cost` field is what the user is billed — except when the
+      // request routes through a BYOK provider key: then OpenRouter bills the account
+      // $0 or only its routing fee, and the user's own key is billed the upstream
+      // inference cost. True spend is the sum. A non-BYOK response always bills at
+      // least the upstream cost, so summing only when upstream exceeds the billed
+      // amount never changes non-BYOK sessions.
+      if (isKilo && upstream !== undefined) return upstream
+      if (upstream !== undefined && upstream > (regular ?? -Infinity)) return upstream + (regular ?? 0)
+      if (regular !== undefined) return regular
     }
 
-    // 2. Anthropic Messages or OpenAI Responses via OpenRouter. The `@ai-sdk/anthropic`
-    //    (`convertAnthropicUsage`) and `@ai-sdk/openai` (`convertOpenAIResponsesUsage`)
-    //    providers both copy the verbatim provider usage object onto `usage.raw`, so
-    //    OpenRouter's upstream inference cost lands at
-    //    `usage.raw.cost_details.upstream_inference_cost` with snake_case preserved.
-    //    Kilo doesn't charge end users a per-request fee, so the top-level `cost` field
-    //    (the OpenRouter fee) would understate the user's true spend; only the upstream
-    //    cost is meaningful here.
-    const raw = input.usage?.raw as { cost_details?: { upstream_inference_cost?: number } } | undefined
-    const upstream = num(raw?.cost_details?.upstream_inference_cost)
+    // 2. Anthropic Messages or OpenAI Responses via OpenRouter. The Kilo Gateway wrapper
+    //    restores the verbatim usage payload under the AI SDK's raw usage escape hatch.
+    //    Kilo doesn't charge end users a per-request fee, so only upstream cost is relevant.
+    const usage = input.usage?.providerMetadata
+    const aiSdk = usage?.["aiSdk"]?.["cost_details"] as { upstream_inference_cost?: number } | undefined
+    const upstream = num(aiSdk?.upstream_inference_cost)
     if (upstream !== undefined) return upstream
 
     // 3. Anthropic Messages or OpenAI Responses via Vercel AI Gateway. `cost` is the
     //    gateway fee that Kilo would pass through, but Kilo doesn't charge end users a
     //    per-request fee, so always use `marketCost` (the upstream provider's price).
     //    Values are emitted as strings on the wire.
-    //
-    //    NOTE: this branch is currently dormant because neither `@ai-sdk/anthropic` nor
-    //    `@ai-sdk/openai` (responses) forwards the SSE-level `provider_metadata.gateway`
-    //    block to `providerMetadata`. Kept as defensive code so the cost starts flowing
-    //    automatically once the SDK gap is closed.
     const gateway = input.metadata?.["gateway"] as { marketCost?: string | number } | undefined
     const marketCost = num(gateway?.marketCost)
     if (marketCost !== undefined) return marketCost
@@ -266,16 +297,36 @@ export namespace KiloSession {
   // These helpers catch that specific error and log a warning instead.
   // ---------------------------------------------------------------------------
 
-  export function runSyncSafe(run: () => void, context: { type: string; id: string; sessionID: string }): void {
-    try {
-      run()
-    } catch (e: any) {
-      if (e?.code === "SQLITE_CONSTRAINT_FOREIGNKEY") {
-        log.warn(`skipping ${context.type} for deleted session`, { id: context.id, sessionID: context.sessionID })
-        return
-      }
-      throw e
+  function foreignKey(input: unknown): boolean {
+    if (Cause.isCause(input)) {
+      return input.reasons.some((reason) => {
+        if (Cause.isFailReason(reason)) return foreignKey(reason.error)
+        if (Cause.isDieReason(reason)) return foreignKey(reason.defect)
+        return false
+      })
     }
+    if (typeof input !== "object" || input === null) return false
+    if ("code" in input && input.code === "SQLITE_CONSTRAINT_FOREIGNKEY") return true
+    return "cause" in input && foreignKey(input.cause)
+  }
+
+  export function runSyncSafe<E, R>(
+    run: Effect.Effect<void, E, R>,
+    context: { type: string; id: string; sessionID: string },
+  ) {
+    return run.pipe(
+      Effect.catchCause((cause) => {
+        if (foreignKey(cause)) {
+          return Effect.sync(() =>
+            log.warn(`skipping ${context.type} for deleted session`, {
+              id: context.id,
+              sessionID: context.sessionID,
+            }),
+          )
+        }
+        return Effect.failCause(cause)
+      }),
+    )
   }
 
   // ---------------------------------------------------------------------------
@@ -285,7 +336,7 @@ export namespace KiloSession {
   /** Schema for project summary returned by listGlobal. */
   export const ProjectInfo = z
     .object({
-      id: ProjectID.zod,
+      id: z.custom<ProjectV2.ID>(Schema.is(ProjectV2.ID)),
       name: z.string().optional(),
       worktree: z.string(),
     })
@@ -299,11 +350,12 @@ export namespace KiloSession {
    * The `fromRow` callback converts a DB row into a Session.Info;
    * it is injected to avoid a circular dependency on Session.
    */
-  export function* listGlobal<T extends { time: { updated: number }; project?: ProjectInfo | null }>(input: {
+  export function listGlobal<T extends { time: { updated: number }; project?: ProjectInfo | null }>(input: {
     fromRow: (row: SessionRow) => Omit<T, "project">
     projectID?: string
     directory?: string
     directories?: string[]
+    currentDirectory?: string
     roots?: boolean
     start?: number
     cursor?: number
@@ -311,45 +363,58 @@ export namespace KiloSession {
     limit?: number
     archived?: boolean
   }) {
-    const conditions: SQL[] = []
+    return Effect.gen(function* () {
+      const { db } = yield* Database.Service
+      const conditions: SQL[] = []
+      const dirs = [...new Set((input.directories ?? []).map((dir) => Filesystem.resolve(dir)))]
 
-    if (input.projectID) {
-      const ids = family(input.projectID)
-      if (ids.length === 1 && ids[0] === input.projectID) {
-        conditions.push(eq(SessionTable.project_id, ProjectID.make(input.projectID)))
-      } else {
-        conditions.push(
-          inArray(
-            SessionTable.project_id,
-            ids.map((id) => ProjectID.make(id)),
-          ),
-        )
+      if (input.projectID) {
+        const projects = yield* db
+          .select({ id: ProjectTable.id, worktree: ProjectTable.worktree, sandboxes: ProjectTable.sandboxes })
+          .from(ProjectTable)
+          .all()
+          .pipe(Effect.orDie)
+        const ids = family(input.projectID, projects, dirs)
+        if (ids.length === 1 && ids[0] === input.projectID) {
+          conditions.push(eq(SessionTable.project_id, ProjectV2.ID.make(input.projectID)))
+        } else {
+          conditions.push(
+            inArray(
+              SessionTable.project_id,
+              ids.map((id) => ProjectV2.ID.make(id)),
+            ),
+          )
+        }
       }
-    }
 
-    if (input.directory) {
-      conditions.push(eq(SessionTable.directory, Filesystem.resolve(input.directory)))
-    }
-    if (input.roots) {
-      conditions.push(isNull(SessionTable.parent_id))
-    }
-    if (input.start) {
-      conditions.push(gte(SessionTable.time_updated, input.start))
-    }
-    if (input.cursor) {
-      conditions.push(lt(SessionTable.time_updated, input.cursor))
-    }
-    if (input.search) {
-      conditions.push(like(SessionTable.title, `%${input.search}%`))
-    }
-    if (!input.archived) {
-      conditions.push(isNull(SessionTable.time_archived))
-    }
+      if (input.directory) conditions.push(eq(SessionTable.directory, Filesystem.resolve(input.directory)))
+      if (input.roots) conditions.push(isNull(SessionTable.parent_id))
+      if (input.start) conditions.push(gte(SessionTable.time_updated, input.start))
+      if (input.cursor) conditions.push(lt(SessionTable.time_updated, input.cursor))
+      if (input.search) conditions.push(like(SessionTable.title, `%${input.search}%`))
+      if (!input.archived) conditions.push(isNull(SessionTable.time_archived))
 
-    const limit = input.limit ?? 100
-    const dirs = [...new Set((input.directories ?? []).map((dir) => Filesystem.resolve(dir)))]
+      const limit = input.limit ?? 100
+      const sorted = [...dirs].sort((a, b) => b.length - a.length)
+      const nested = (root: string, dir: string): boolean => {
+        if (dir === root || !Filesystem.contains(root, dir)) return false
+        if (existsSync(path.join(dir, ".git"))) return true
+        const parent = path.dirname(dir)
+        return parent !== dir && nested(root, parent)
+      }
+      const worktree = (dir: string) => {
+        for (const root of sorted) {
+          if (!Filesystem.contains(root, dir) || nested(root, dir)) continue
+          const rel = path.relative(root, dir)
+          const parts = rel.split(path.sep)
+          if ((parts[0] === ".kilo" || parts[0] === ".kilocode") && parts[1] === "worktrees" && parts[2]) {
+            return path.join(root, parts[0], parts[1], parts[2])
+          }
+          return root
+        }
+      }
+      const current = input.currentDirectory ? worktree(Filesystem.resolve(input.currentDirectory)) : undefined
 
-    const rows = Database.use((db) => {
       const query =
         conditions.length > 0
           ? db
@@ -357,58 +422,48 @@ export namespace KiloSession {
               .from(SessionTable)
               .where(and(...conditions))
           : db.select().from(SessionTable)
-      const sorted = query.orderBy(desc(SessionTable.time_updated), desc(SessionTable.id))
-      return dirs.length ? sorted.all() : sorted.limit(limit).all()
-    })
+      const ordered = query.orderBy(desc(SessionTable.time_updated), desc(SessionTable.id))
+      const rows = yield* (dirs.length ? ordered.all() : ordered.limit(limit).all()).pipe(Effect.orDie)
 
-    const list =
-      dirs.length > 0
-        ? rows.filter((row) => {
-            const dir = Filesystem.resolve(row.directory)
-            return dirs.some((root) => Filesystem.contains(root, dir))
-          })
-        : rows
+      const list =
+        dirs.length > 0
+          ? rows.filter((row) => {
+              const dir = Filesystem.resolve(row.directory)
+              const root = worktree(dir)
+              if (!root) return false
+              if (input.currentDirectory) return root === current
+              return true
+            })
+          : rows
 
-    const ids = [...new Set(list.slice(0, limit).map((row) => row.project_id))]
-    const projects = new Map<string, ProjectInfo>()
+      const ids = [...new Set(list.slice(0, limit).map((row) => row.project_id))]
+      const projects = new Map<string, ProjectInfo>()
 
-    if (ids.length > 0) {
-      const items = Database.use((db) =>
-        db
+      if (ids.length > 0) {
+        const items = yield* db
           .select({ id: ProjectTable.id, name: ProjectTable.name, worktree: ProjectTable.worktree })
           .from(ProjectTable)
           .where(inArray(ProjectTable.id, ids))
-          .all(),
-      )
-      for (const item of items) {
-        projects.set(item.id, {
-          id: item.id,
-          name: item.name ?? undefined,
-          worktree: item.worktree,
-        })
+          .all()
+          .pipe(Effect.orDie)
+        for (const item of items) {
+          projects.set(item.id, {
+            id: item.id,
+            name: item.name ?? undefined,
+            worktree: item.worktree,
+          })
+        }
       }
-    }
 
-    for (const row of list.slice(0, limit)) {
-      const project = projects.get(row.project_id) ?? null
-      yield { ...input.fromRow(row), project } as T & { project: ProjectInfo | null }
-    }
+      return list.slice(0, limit).map((row) => {
+        const project = projects.get(row.project_id) ?? null
+        return { ...input.fromRow(row), project } as T & { project: ProjectInfo | null }
+      })
+    })
   }
 
+  export const prepareForkedPart = _prepareForkedPart
   export const remapChildren = _remapChildren
 }
 
-export const kiloSessionFork = fn(
-  z.object({ sessionID: SessionID.zod, messageID: MessageID.zod.optional() }),
-  async (input) => {
-    const { AppRuntime } = await import("@/effect/app-runtime")
-    return AppRuntime.runPromise(
-      Effect.gen(function* () {
-        const sessions = yield* Session.Service
-        const session = yield* sessions.fork(input)
-        yield* KiloSession.remapChildren(session.id)
-        return session
-      }),
-    )
-  },
-)
+export { kiloSessionFork } from "./fork-command"

@@ -3,12 +3,12 @@
 // When upstream adds a new command to index.ts, add it here too.
 import { AcpCommand } from "../cli/cmd/acp"
 import { McpCommand } from "../cli/cmd/mcp"
-import { TuiThreadCommand } from "../cli/cmd/tui/thread"
-import { AttachCommand } from "../cli/cmd/tui/attach"
+import { TuiThreadCommand } from "../cli/cmd/tui"
+import { AttachCommand } from "../cli/cmd/attach"
 import { RunCommand } from "../cli/cmd/run"
 import { GenerateCommand } from "../cli/cmd/generate"
 import { DebugCommand } from "../cli/cmd/debug"
-import { ProvidersCommand } from "../cli/cmd/providers" // kilocode_change — upstream renamed auth → providers
+import { ProvidersCommand } from "../cli/cmd/providers"
 import { AgentCommand } from "../cli/cmd/agent"
 import { UpgradeCommand } from "../cli/cmd/upgrade"
 import { UninstallCommand } from "../cli/cmd/uninstall"
@@ -17,6 +17,7 @@ import { ModelsCommand } from "../cli/cmd/models"
 import { StatsCommand } from "../cli/cmd/stats"
 import { ExportCommand } from "../cli/cmd/export"
 import { ImportCommand } from "../cli/cmd/import"
+import { GithubCommand } from "../cli/cmd/github"
 import { PrCommand } from "../cli/cmd/pr"
 import { SessionCommand } from "../cli/cmd/session"
 import { RemoteCommand } from "../cli/cmd/remote"
@@ -25,6 +26,10 @@ import { ConfigCommand as ConfigCLICommand } from "../cli/cmd/config"
 import { PluginCommand } from "../cli/cmd/plug"
 import { DevSetupCommand, DevAliasCommand } from "./cli/dev-setup"
 import { RollCallCommand } from "./cli/cmd/roll-call"
+import { ProfileCommand } from "./cli/cmd/profile"
+import { DaemonCommand } from "./cli/cmd/daemon"
+import { KiloConsoleCommand } from "./cli/cmd/console"
+import { CloudCommand } from "./cli/cmd/cloud"
 import { HelpCommand } from "./help-command"
 import { InstallationBuildKind } from "@opencode-ai/core/installation/version"
 
@@ -50,19 +55,24 @@ export const commands = [
   RunCommand,
   GenerateCommand,
   DebugCommand,
-  ProvidersCommand, // kilocode_change — upstream renamed AuthCommand → ProvidersCommand
+  ProvidersCommand,
   AgentCommand,
   UpgradeCommand,
   UninstallCommand,
   ServeCommand,
   ModelsCommand,
   RollCallCommand,
+  ProfileCommand,
   StatsCommand,
   ExportCommand,
   ImportCommand,
+  GithubCommand,
   PrCommand,
   SessionCommand,
   RemoteCommand,
+  DaemonCommand,
+  KiloConsoleCommand,
+  CloudCommand,
   DbCommand,
   ConfigCLICommand,
   ...dev,

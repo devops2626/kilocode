@@ -4,25 +4,34 @@ import ai.kilocode.backend.cli.KiloCliDataParser
 import ai.kilocode.log.ChatLogSummary
 import ai.kilocode.log.KiloLog
 import ai.kilocode.rpc.dto.ChatEventDto
-import ai.kilocode.rpc.dto.ConfigUpdateDto
 import ai.kilocode.rpc.dto.MessageWithPartsDto
 import ai.kilocode.rpc.dto.ModelSelectionDto
 import ai.kilocode.rpc.dto.PermissionAlwaysRulesDto
 import ai.kilocode.rpc.dto.PermissionReplyDto
 import ai.kilocode.rpc.dto.PermissionRequestDto
+import ai.kilocode.rpc.dto.PartDto
 import ai.kilocode.rpc.dto.PromptDto
 import ai.kilocode.rpc.dto.QuestionReplyDto
 import ai.kilocode.rpc.dto.QuestionRequestDto
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
+import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.Response
 import okhttp3.RequestBody.Companion.toRequestBody
+import java.io.IOException
+import java.util.concurrent.TimeUnit
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
 /**
  * Chat orchestrator that handles message sending, history loading,
@@ -39,6 +48,8 @@ class KiloBackendChatManager(
 ) {
     companion object {
         private val JSON_TYPE = "application/json".toMediaType()
+        private const val ENHANCE_TIMEOUT_MINUTES = 2L
+        private const val REVERT_TIMEOUT_SECONDS = 35L
 
         private val CHAT_EVENTS = setOf(
             "message.updated",
@@ -53,6 +64,7 @@ class KiloBackendChatManager(
             "session.status",
             "session.updated",
             "session.idle",
+            "session.queue.changed",
             "session.compacted",
             "session.diff",
             "permission.asked",
@@ -70,6 +82,7 @@ class KiloBackendChatManager(
     private var client: OkHttpClient? = null
     private var base: String? = null
     private var watcher: Job? = null
+    private var normalizer = KiloCliDataParser.ChatEventNormalizer()
 
     fun start(http: OkHttpClient, port: Int, sse: SharedFlow<SseEvent>) {
         client = http
@@ -77,19 +90,38 @@ class KiloBackendChatManager(
         if (watcher?.isActive == true) return
         watcher = cs.launch {
             sse.collect { event ->
-                if (event.type in CHAT_EVENTS) {
-                    val parsed = KiloCliDataParser.parseChatEvent(event.type, event.data)
-                    if (parsed != null) {
-                        log.debug { ChatLogSummary.event(parsed) }
-                        if (parsed is ChatEventDto.SessionStatusChanged && parsed.status.type != "busy") {
-                            log.info(
-                                "${ChatLogSummary.sid(parsed.sessionID)} kind=status route=chat-events emit=true " +
-                                    "${ChatLogSummary.status(parsed.status)} bytes=${event.data.length}",
-                            )
+                val type = if (event.type in CHAT_EVENTS) event.type else KiloCliDataParser.extractEventType(event.data)
+                if (type in CHAT_EVENTS) {
+                    val events = try {
+                        normalizer.parse(type, event.data)
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        log.warn(
+                            "route=chat-events parse=false type=$type raw=${event.type} bytes=${event.data.length} ${ChatLogSummary.body(event.data)}",
+                            e,
+                        )
+                        return@collect
+                    }
+                    if (events != null) {
+                        for (parsed in events) {
+                            log.debug { ChatLogSummary.event(parsed) }
+                            ChatLogSummary.error(parsed)?.let { error ->
+                                log.warn(
+                                    "route=chat-events emit=true raw=${event.type} bytes=${event.data.length} " +
+                                        "subscribers=${_events.subscriptionCount.value} $error",
+                                )
+                            }
+                            if (parsed is ChatEventDto.SessionStatusChanged && parsed.status.type != "busy") {
+                                log.info(
+                                    "${ChatLogSummary.sid(parsed.sessionID)} kind=status route=chat-events emit=true " +
+                                        "${ChatLogSummary.status(parsed.status)} bytes=${event.data.length}",
+                                )
+                            }
+                            _events.emit(parsed)
                         }
-                        _events.emit(parsed)
                     } else {
-                        log.warn("SSE parse returned null for type=${event.type} bytes=${event.data.length}")
+                        log.warn("route=chat-events parse=null type=$type raw=${event.type} bytes=${event.data.length} ${ChatLogSummary.body(event.data)}")
                     }
                 }
             }
@@ -102,10 +134,33 @@ class KiloBackendChatManager(
         watcher = null
         client = null
         base = null
+        normalizer = KiloCliDataParser.ChatEventNormalizer()
         log.info("Chat manager stopped")
     }
 
     // ------ prompt ------
+
+    suspend fun enhancePrompt(dir: String, text: String): String {
+        val http = requireClient()
+        val url = requireBase()
+        val body = KiloCliDataParser.buildEnhancePromptJson(text)
+        val request = Request.Builder()
+            .url("$url/enhance-prompt?directory=${encode(dir)}")
+            .post(body.toRequestBody(JSON_TYPE))
+            .build()
+        val call = http.newCall(request)
+        call.timeout().timeout(ENHANCE_TIMEOUT_MINUTES, TimeUnit.MINUTES)
+
+        return call.await().use { response ->
+            val raw = response.body?.string().orEmpty()
+            if (!response.isSuccessful) {
+                log.warn("enhance prompt failed: HTTP ${response.code}")
+                raw.takeIf { it.isNotBlank() }?.let { log.debug { "kind=enhancePrompt error=${ChatLogSummary.body(it)}" } }
+                throw RuntimeException("Enhance prompt failed: HTTP ${response.code}")
+            }
+            KiloCliDataParser.parseEnhancedPrompt(raw)
+        }
+    }
 
     fun prompt(id: String, dir: String, prompt: PromptDto) {
         val meta = if (log.isDebugEnabled) {
@@ -132,8 +187,10 @@ class KiloBackendChatManager(
                     val raw = response.body?.string()
                     log.warn("prompt_async failed: HTTP $code")
                     raw?.let { log.debug { "${ChatLogSummary.sid(id)} kind=prompt op=prompt_async error=${ChatLogSummary.body(it)}" } }
-                    throw RuntimeException("prompt_async failed: HTTP $code")
+                    val detail = raw?.takeIf { it.isNotBlank() }?.let { ": ${ChatLogSummary.body(it)}" }.orEmpty()
+                    throw RuntimeException("prompt_async failed: HTTP $code$detail")
                 }
+                log.info("${ChatLogSummary.sid(id)} kind=prompt op=prompt_async accepted=true code=$code ${ChatLogSummary.prompt(prompt)}")
                 log.debug { "${ChatLogSummary.sid(id)} kind=prompt op=prompt_async ok=true code=$code" }
             }
         } catch (e: RuntimeException) {
@@ -142,6 +199,12 @@ class KiloBackendChatManager(
             log.warn("${ChatLogSummary.sid(id)} kind=prompt op=prompt_async dir=${ChatLogSummary.dir(dir)} failed message=${e.message}", e)
             throw RuntimeException("prompt_async HTTP call failed: ${e.message}", e)
         }
+    }
+
+    fun command(id: String, dir: String, command: String, args: String, prompt: PromptDto) {
+        log.info("${ChatLogSummary.sid(id)} kind=command command=$command args=${args.length} parts=${prompt.parts.size}")
+        val body = KiloCliDataParser.buildCommandJson(command, args, prompt)
+        post("/session/$id/command?directory=${encode(dir)}", body, "command", "${ChatLogSummary.sid(id)} kind=command command=$command")
     }
 
     // ------ abort ------
@@ -196,6 +259,38 @@ class KiloBackendChatManager(
         }
     }
 
+    suspend fun revert(id: String, dir: String, message: String, part: String?) {
+        log.info("${ChatLogSummary.sid(id)} kind=revert ${ChatLogSummary.dir(dir)} message=$message part=${part ?: "none"}")
+        val body = KiloCliDataParser.buildRevertJson(message, part)
+        postCancellable("/session/$id/revert?directory=${encode(dir)}", body, "revert", "${ChatLogSummary.sid(id)} kind=revert")
+    }
+
+    suspend fun deleteMessage(id: String, dir: String, message: String): Boolean {
+        log.info("${ChatLogSummary.sid(id)} kind=deleteMessage ${ChatLogSummary.dir(dir)} message=$message")
+        val http = requireClient()
+        val url = requireBase()
+        val request = Request.Builder()
+            .url("$url/session/$id/message/$message?directory=${encode(dir)}")
+            .delete()
+            .build()
+        val call = http.newCall(request)
+        call.timeout().timeout(REVERT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+        return call.await().use { response ->
+            val raw = response.body?.string().orEmpty().trim()
+            if (!response.isSuccessful) {
+                log.warn("deleteMessage failed: HTTP ${response.code}")
+                raw.takeIf { it.isNotBlank() }?.let { log.debug { "${ChatLogSummary.sid(id)} kind=deleteMessage error=${ChatLogSummary.body(it)}" } }
+                return@use false
+            }
+            raw != "false"
+        }
+    }
+
+    suspend fun unrevert(id: String, dir: String) {
+        log.info("${ChatLogSummary.sid(id)} kind=unrevert ${ChatLogSummary.dir(dir)}")
+        postCancellable("/session/$id/unrevert?directory=${encode(dir)}", "{}", "unrevert", "${ChatLogSummary.sid(id)} kind=unrevert")
+    }
+
     // ------ messages ------
 
     fun messages(id: String, dir: String): List<MessageWithPartsDto> {
@@ -220,25 +315,33 @@ class KiloBackendChatManager(
         }
     }
 
-    // ------ config update ------
+    fun attachmentPart(id: String, dir: String, message: String, part: String, key: String?): PartDto? {
+        return messages(id, dir)
+            .firstOrNull { it.info.id == message }
+            ?.parts
+            ?.firstOrNull {
+                if (it.type != "file") return@firstOrNull false
+                if (!key.isNullOrBlank()) attachmentKey(it.id, it.filename.orEmpty(), it.url.orEmpty()) == key
+                else it.id == part
+            }
+    }
 
-    fun updateConfig(dir: String, update: ConfigUpdateDto) {
-        val http = requireClient()
-        val url = requireBase()
+    // ------ interruption ------
 
-        val partial = KiloCliDataParser.buildConfigPartial(update)
-
-        val request = Request.Builder()
-            .url("$url/global/config")
-            .patch(partial.toRequestBody(JSON_TYPE))
-            .build()
-
-        http.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) {
-                val msg = response.body?.string() ?: "unknown error"
-                log.warn("config update failed: HTTP ${response.code} — $msg")
-            } else {
-                log.info("Config updated: model=${update.model}, agent=${update.agent}, temp=${update.temperature}")
+    /**
+     * Tell every session in [ids] that the CLI stopped its turn for [reason].
+     *
+     * Synthesized into the same stream the CLI events use so a session's own controller sees it in
+     * order with the abort it explains. The CLI cannot express this itself: it reports a server-side
+     * cancellation as the same `MessageAbortedError` a user Stop produces, so the UI would otherwise
+     * report work nobody stopped as "Stopped".
+     */
+    fun interrupt(ids: Collection<String>, reason: String) {
+        if (ids.isEmpty()) return
+        cs.launch {
+            for (id in ids) {
+                log.warn("${ChatLogSummary.sid(id)} kind=interrupt route=chat-events reason=$reason")
+                _events.emit(ChatEventDto.SessionInterrupted(id, reason))
             }
         }
     }
@@ -284,7 +387,7 @@ class KiloBackendChatManager(
 
     // ------ utilities ------
 
-    private fun post(path: String, body: String, op: String, meta: String) {
+    private fun post(path: String, body: String, op: String, meta: String, strict: Boolean = false) {
         val http = requireClient()
         val url = requireBase()
         val request = Request.Builder()
@@ -293,8 +396,33 @@ class KiloBackendChatManager(
             .build()
         http.newCall(request).execute().use { response ->
             if (!response.isSuccessful) {
-                log.warn("$op failed: HTTP ${response.code}")
+                val code = response.code
+                val raw = response.body?.string()
+                log.warn("$op failed: HTTP $code")
+                raw?.let { log.debug { "$meta op=$op error=${ChatLogSummary.body(it)}" } }
+                if (strict) throw RuntimeException("$op failed: HTTP $code")
                 return
+            }
+            log.debug { "$meta op=$op ok=true code=${response.code}" }
+        }
+    }
+
+    private suspend fun postCancellable(path: String, body: String, op: String, meta: String) {
+        val http = requireClient()
+        val url = requireBase()
+        val request = Request.Builder()
+            .url("$url$path")
+            .post(body.toRequestBody(JSON_TYPE))
+            .build()
+        val call = http.newCall(request)
+        call.timeout().timeout(REVERT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+        call.await().use { response ->
+            if (!response.isSuccessful) {
+                val code = response.code
+                val raw = response.body?.string()
+                log.warn("$op failed: HTTP $code")
+                raw?.let { log.debug { "$meta op=$op error=${ChatLogSummary.body(it)}" } }
+                throw RuntimeException("$op failed: HTTP $code")
             }
             log.debug { "$meta op=$op ok=true code=${response.code}" }
         }
@@ -324,6 +452,25 @@ class KiloBackendChatManager(
     private fun requireBase(): String =
         base ?: throw IllegalStateException("Chat manager not started")
 
+    private suspend fun Call.await(): Response = suspendCancellableCoroutine { cont ->
+        cont.invokeOnCancellation { cancel() }
+        enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                if (!cont.isCancelled) cont.resumeWithException(e)
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                cont.resume(response) { _, value, _ -> value.close() }
+            }
+        })
+    }
+
     private fun encode(value: String): String =
         java.net.URLEncoder.encode(value, "UTF-8")
+
+    private fun attachmentKey(part: String, name: String, url: String): String {
+        val value = listOf(part, name, url).joinToString("\u0000")
+        val bytes = java.security.MessageDigest.getInstance("SHA-256").digest(value.toByteArray(Charsets.UTF_8))
+        return bytes.take(16).joinToString("") { "%02x".format(it) }
+    }
 }

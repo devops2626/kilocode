@@ -1,16 +1,23 @@
 package ai.kilocode.backend.workspace
 
+import ai.kilocode.backend.app.ConfigWarning
 import ai.kilocode.backend.app.KiloBackendSessionManager
 import ai.kilocode.backend.app.LoadError
 import ai.kilocode.backend.app.SseEvent
+import ai.kilocode.backend.cli.KiloBackendHttpClients
 import ai.kilocode.backend.cli.KiloCliDataParser
 import ai.kilocode.log.KiloLog
 import ai.kilocode.jetbrains.api.client.DefaultApi
+import ai.kilocode.jetbrains.api.infrastructure.ClientError
+import ai.kilocode.jetbrains.api.infrastructure.ClientException
+import ai.kilocode.jetbrains.api.infrastructure.ServerError
+import ai.kilocode.jetbrains.api.infrastructure.ServerException
 import ai.kilocode.jetbrains.api.model.Agent
 import ai.kilocode.rpc.dto.SessionDto
 import ai.kilocode.rpc.dto.SessionListDto
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
@@ -20,8 +27,11 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import java.nio.file.Files
+import java.nio.file.Path
 import java.util.concurrent.atomic.AtomicReference
 
 /**
@@ -49,10 +59,23 @@ class KiloBackendWorkspace(
     companion object {
         private const val MAX_RETRIES = 3
         private const val RETRY_DELAY_MS = 1000L
+        private const val WARNINGS_TIMEOUT_SECONDS = 5L
     }
 
     private val _state = MutableStateFlow<KiloWorkspaceState>(KiloWorkspaceState.Pending)
     val state: StateFlow<KiloWorkspaceState> = _state.asStateFlow()
+
+    /**
+     * Config warnings are optional, so they use a bounded client rather than the workspace [api],
+     * which has no call/read timeout. A stalled fetch would otherwise hold the workspace on
+     * Connecting even though the required catalog already loaded.
+     */
+    private val warningsApi by lazy {
+        DefaultApi(
+            basePath = "http://127.0.0.1:$port",
+            client = KiloBackendHttpClients.bounded(http, WARNINGS_TIMEOUT_SECONDS),
+        )
+    }
 
     private var loader: Job? = null
     private var eventWatcher: Job? = null
@@ -64,89 +87,103 @@ class KiloBackendWorkspace(
             loader?.cancel()
             eventWatcher?.cancel()
             loader = cs.launch {
-            log.info("Loading workspace data for $directory")
-            val progress = AtomicReference(KiloWorkspaceLoadProgress())
-            _state.value = KiloWorkspaceState.Loading(progress.get())
-
-            var prov: ProviderData? = null
-            var ag: AgentData? = null
-            var cmd: List<CommandInfo>? = null
-            var sk: List<SkillInfo>? = null
-            val errors = mutableListOf<LoadError>()
-
-            try {
-                coroutineScope {
-                    launch {
-                        val result = fetchWithRetry("providers") { fetchProviders() }
-                        ensureActive()
-                        if (result.value != null) {
-                            prov = result.value
-                            progress.updateAndGet { it.copy(providers = true) }
-                                .also { _state.value = KiloWorkspaceState.Loading(it) }
-                        } else {
-                            val err = result.error ?: LoadError(resource = "providers")
-                            synchronized(errors) { errors.add(err) }
-                            throw LoadFailure(err)
-                        }
-                    }
-                    launch {
-                        val result = fetchWithRetry("agents") { fetchAgents() }
-                        ensureActive()
-                        if (result.value != null) {
-                            ag = result.value
-                            progress.updateAndGet { it.copy(agents = true) }
-                                .also { _state.value = KiloWorkspaceState.Loading(it) }
-                        } else {
-                            val err = result.error ?: LoadError(resource = "agents")
-                            synchronized(errors) { errors.add(err) }
-                            throw LoadFailure(err)
-                        }
-                    }
-                    launch {
-                        val result = fetchWithRetry("commands") { fetchCommands() }
-                        ensureActive()
-                        if (result.value != null) {
-                            cmd = result.value
-                            progress.updateAndGet { it.copy(commands = true) }
-                                .also { _state.value = KiloWorkspaceState.Loading(it) }
-                        } else {
-                            val err = result.error ?: LoadError(resource = "commands")
-                            synchronized(errors) { errors.add(err) }
-                            throw LoadFailure(err)
-                        }
-                    }
-                    launch {
-                        val result = fetchWithRetry("skills") { fetchSkills() }
-                        ensureActive()
-                        if (result.value != null) {
-                            sk = result.value
-                            progress.updateAndGet { it.copy(skills = true) }
-                                .also { _state.value = KiloWorkspaceState.Loading(it) }
-                        } else {
-                            val err = result.error ?: LoadError(resource = "skills")
-                            synchronized(errors) { errors.add(err) }
-                            throw LoadFailure(err)
-                        }
-                    }
+                log.info("Loading workspace data for $directory")
+                val reason = RemoteDirectory.detect(directory)
+                if (reason != null) {
+                    log.info("Workspace directory is unsupported for host-side Kilo runtime: $reason [$directory]")
+                    _state.value = KiloWorkspaceState.Unsupported(reason)
+                    return@launch
                 }
+                if (!Files.isDirectory(Path.of(directory))) {
+                    log.info("Workspace directory is missing: $directory")
+                    _state.value = KiloWorkspaceState.Missing(directory)
+                    return@launch
+                }
+                val progress = AtomicReference(KiloWorkspaceLoadProgress())
+                _state.value = KiloWorkspaceState.Loading(progress.get())
 
-                ensureActive()
-                _state.value = KiloWorkspaceState.Ready(
-                    providers = prov!!,
-                    agents = ag!!,
-                    commands = cmd!!,
-                    skills = sk!!,
-                )
-                log.info("Workspace data loaded for $directory")
-                startWatchingGlobalSseEvents()
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                log.warn("Workspace data load failed for $directory: ${e.message}")
-                val items = synchronized(errors) { errors.toList() }
-                val names = items.joinToString { it.resource }
-                setWorkspaceError("Failed to load: $names", items)
-            }
+                var prov: ProviderData? = null
+                var ag: AgentData? = null
+                var cmd: List<CommandInfo>? = null
+                var sk: List<SkillInfo>? = null
+                val errors = mutableListOf<LoadError>()
+
+                try {
+                    coroutineScope {
+                        launch {
+                            val result = fetchWithRetry("providers") { fetchProviders() }
+                            ensureActive()
+                            if (result.value != null) {
+                                prov = result.value
+                                progress.updateAndGet { it.copy(providers = true) }
+                                    .also { _state.value = KiloWorkspaceState.Loading(it) }
+                            } else {
+                                val err = result.error ?: LoadError(resource = "providers")
+                                synchronized(errors) { errors.add(err) }
+                                throw LoadFailure(err)
+                            }
+                        }
+                        launch {
+                            val result = fetchWithRetry("agents") { fetchAgents() }
+                            ensureActive()
+                            if (result.value != null) {
+                                ag = result.value
+                                progress.updateAndGet { it.copy(agents = true) }
+                                    .also { _state.value = KiloWorkspaceState.Loading(it) }
+                            } else {
+                                val err = result.error ?: LoadError(resource = "agents")
+                                synchronized(errors) { errors.add(err) }
+                                throw LoadFailure(err)
+                            }
+                        }
+                        launch {
+                            val result = fetchWithRetry("commands") { fetchCommands() }
+                            ensureActive()
+                            if (result.value != null) {
+                                cmd = result.value
+                                progress.updateAndGet { it.copy(commands = true) }
+                                    .also { _state.value = KiloWorkspaceState.Loading(it) }
+                            } else {
+                                val err = result.error ?: LoadError(resource = "commands")
+                                synchronized(errors) { errors.add(err) }
+                                throw LoadFailure(err)
+                            }
+                        }
+                        launch {
+                            val result = fetchWithRetry("skills") { fetchSkills() }
+                            ensureActive()
+                            if (result.value != null) {
+                                sk = result.value
+                                progress.updateAndGet { it.copy(skills = true) }
+                                    .also { _state.value = KiloWorkspaceState.Loading(it) }
+                            } else {
+                                val err = result.error ?: LoadError(resource = "skills")
+                                synchronized(errors) { errors.add(err) }
+                                throw LoadFailure(err)
+                            }
+                        }
+                    }
+
+                    ensureActive()
+                    val warns = warnings()
+                    ensureActive()
+                    startWatchingGlobalSseEvents()
+                    _state.value = KiloWorkspaceState.Ready(
+                        providers = prov!!,
+                        agents = ag!!,
+                        commands = cmd!!,
+                        skills = sk!!,
+                        warnings = warns,
+                    )
+                    log.info("Workspace data loaded for $directory")
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    log.warn("Workspace data load failed for $directory: ${e.message}")
+                    val items = synchronized(errors) { errors.toList() }
+                    val names = items.joinToString { it.resource }
+                    setWorkspaceError("Failed to load: $names", items)
+                }
             }
         }
     }
@@ -179,6 +216,8 @@ class KiloBackendWorkspace(
      *
      * - `global.disposed` — CLI server context torn down, all data stale.
      * - `server.instance.disposed` — server instance disposed, reload.
+     * - `global.config.updated` — project config changed on disk or via CLI; refresh only
+     *   config warnings in-place, without reloading providers/agents/commands/skills.
      *
      * Idempotent — only one watcher runs at a time.
      */
@@ -197,23 +236,54 @@ class KiloBackendWorkspace(
                             log.info("SSE server.instance.disposed — reloading workspace data for $directory")
                             load()
                         }
+                        "global.config.updated" -> {
+                            log.info("SSE global.config.updated — refreshing config warnings for $directory")
+                            // Launched so a slow fetch cannot block this collector and stall the
+                            // shared global SSE flow for chat and other workspaces.
+                            launch { refreshWarnings() }
+                        }
                     }
                 }
             }
         }
     }
 
+    /** Refetches config warnings and updates [Ready][KiloWorkspaceState.Ready] in-place, if still current. */
+    private suspend fun refreshWarnings() {
+        val current = _state.value
+        if (current !is KiloWorkspaceState.Ready) return
+        val next = warnings()
+        val latest = _state.value
+        if (latest === current) _state.value = current.copy(warnings = next)
+    }
+
     // ------ fetch methods ------
 
-    private fun fetchProviders(): FetchResult<ProviderData> =
+    private suspend fun warnings(): List<ConfigWarning> = withContext(Dispatchers.IO) {
+        try {
+            warningsApi.configWarnings(directory = directory).map {
+                ConfigWarning(path = it.path, message = it.message, detail = it.detail)
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            log.warn("Config warnings fetch failed for $directory: ${e.message}", e)
+            emptyList()
+        }
+    }
+
+    private suspend fun fetchProviders(): FetchResult<ProviderData> = withContext(Dispatchers.IO) {
         try {
             FetchResult.ok(KiloCliDataParser.parseProviders(fetch("/provider?directory=${encode(directory)}")))
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             log.warn("Providers fetch failed: ${e.message}", e)
             FetchResult.fail("providers", e)
         }
+    }
 
-    private fun fetchAgents(): FetchResult<AgentData> =
+    private suspend fun fetchAgents(): FetchResult<AgentData> = withContext(Dispatchers.IO) {
         try {
             val response = api.appAgents(directory = directory)
             val mapped = response.map(::mapAgent)
@@ -223,32 +293,44 @@ class KiloBackendWorkspace(
                 all = mapped,
                 default = visible.firstOrNull()?.name ?: "code",
             ))
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
-            log.warn("Agents fetch failed: ${e.message}", e)
+            log.warn("Agents fetch failed: ${detail(e)}", e)
+            logResponseBody("agents", e)
             FetchResult.fail("agents", e)
         }
+    }
 
-    private fun fetchCommands(): FetchResult<List<CommandInfo>> =
+    private suspend fun fetchCommands(): FetchResult<List<CommandInfo>> = withContext(Dispatchers.IO) {
         try {
             FetchResult.ok(KiloCliDataParser.parseCommands(fetch("/command?directory=${encode(directory)}")))
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             log.warn("Commands fetch failed: ${e.message}", e)
             FetchResult.fail("commands", e)
         }
+    }
 
-    private fun fetchSkills(): FetchResult<List<SkillInfo>> =
+    private suspend fun fetchSkills(): FetchResult<List<SkillInfo>> = withContext(Dispatchers.IO) {
         try {
             FetchResult.ok(api.appSkills(directory = directory).map { s ->
                 SkillInfo(
                     name = s.name,
                     description = s.description,
                     location = s.location,
+                    content = s.content,
                 )
             })
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
-            log.warn("Skills fetch failed: ${e.message}", e)
+            log.warn("Skills fetch failed: ${detail(e)}", e)
+            logResponseBody("skills", e)
             FetchResult.fail("skills", e)
         }
+    }
 
     // ------ helpers ------
 
@@ -274,7 +356,7 @@ class KiloBackendWorkspace(
 
     private suspend fun <T> fetchWithRetry(
         name: String,
-        block: () -> FetchResult<T>,
+        block: suspend () -> FetchResult<T>,
     ): FetchResult<T> {
         var last = FetchResult.fail<T>(name)
         repeat(MAX_RETRIES) { attempt ->
@@ -286,19 +368,34 @@ class KiloBackendWorkspace(
                 delay(RETRY_DELAY_MS)
             }
         }
-        log.error("$name: all $MAX_RETRIES attempts failed")
+        log.warn("$name: all $MAX_RETRIES attempts failed${last.error?.let { ": ${error(it)}" } ?: ""}")
         return last
     }
 
     private fun setWorkspaceError(message: String, errors: List<LoadError>) {
-        log.warn("Workspace error [$directory]: $message")
+        val text = if (errors.isEmpty()) message else "$message [${errors.joinToString("; ") { error(it) }}]"
+        log.warn("Workspace error [$directory]: $text")
         _state.value = KiloWorkspaceState.Error(message, errors)
+    }
+
+    private fun logResponseBody(resource: String, e: Exception) {
+        val body = body(e) ?: return
+        log.warn("$resource response body: $body")
+    }
+
+    private fun error(err: LoadError): String {
+        val status = err.status?.let { " status=$it" } ?: ""
+        val detail = err.detail?.let { " detail=$it" } ?: ""
+        return "${err.resource}$status$detail"
     }
 
     private data class FetchResult<T>(val value: T?, val error: LoadError?) {
         companion object {
             fun <T> ok(value: T) = FetchResult<T>(value, null)
-            fun <T> fail(resource: String, e: Exception? = null) = FetchResult<T>(null, LoadError(resource, detail = e?.message))
+            fun <T> fail(resource: String, e: Exception? = null) = FetchResult<T>(
+                null,
+                LoadError(resource, status = e?.let(::status), detail = e?.let(::detail)),
+            )
         }
     }
 
@@ -307,3 +404,23 @@ class KiloBackendWorkspace(
 }
 
 private fun encode(value: String) = java.net.URLEncoder.encode(value, Charsets.UTF_8)
+
+private fun status(e: Exception): Int? = when (e) {
+    is ClientException -> e.statusCode
+    is ServerException -> e.statusCode
+    else -> null
+}
+
+private fun body(e: Exception): String? = when (e) {
+    is ClientException -> (e.response as? ClientError<*>)?.body?.toString()
+    is ServerException -> (e.response as? ServerError<*>)?.body?.toString()
+    else -> null
+}
+
+private fun detail(e: Exception): String? {
+    val body = body(e)
+    val status = status(e)
+    if (status != null && !body.isNullOrBlank()) return "HTTP $status: $body"
+    if (status != null) return "HTTP $status: ${e.message}"
+    return e.message
+}

@@ -2,6 +2,7 @@ package ai.kilocode.client.session.ui.account
 
 import ai.kilocode.client.plugin.KiloBundle
 import ai.kilocode.client.session.controller.SessionControllerEvent
+import ai.kilocode.client.session.ui.style.SessionUiStyle
 import ai.kilocode.client.ui.FilledBadgeIcon
 import ai.kilocode.client.ui.HoverIcon
 import ai.kilocode.client.ui.PickerButton
@@ -123,7 +124,8 @@ internal class SessionAccountOverlay(
         var layout = false
 
         val orgs = prof.organizations
-        val next = listOf(AccountChoice(null, KiloBundle.message("profile.personalAccount"))) +
+        val personal = prof.hasPersonalAccount
+        val next = (if (personal) listOf(AccountChoice(null, KiloBundle.message("profile.personalAccount"))) else emptyList()) +
             orgs.map { org -> AccountChoice(org.id, org.name) }
         if (next != choices) {
             choices = next
@@ -132,7 +134,7 @@ internal class SessionAccountOverlay(
 
         if (currentOrgId != prof.currentOrgId) currentOrgId = prof.currentOrgId
 
-        val activeId = if (switching) target else prof.currentOrgId
+        val activeId = if (switching) target else prof.currentOrgId ?: if (personal) null else orgs.firstOrNull()?.id
         val active = choices.firstOrNull { it.org == activeId } ?: choices.firstOrNull()
         val title = "${active?.title ?: " "} ▾"
         if (picker.text != title) {
@@ -179,8 +181,7 @@ internal class SessionAccountOverlay(
             if (balanceText != next || balance.icon == null) {
                 balance.icon = FilledBadgeIcon(
                     next,
-                    UiStyle.Colors.badgeBg(),
-                    UiStyle.Colors.badgeFg(),
+                    UiStyle.Badge.Secondary,
                 )
                 layout = true
             }
@@ -193,7 +194,7 @@ internal class SessionAccountOverlay(
 
     @RequiresEdt
     private fun showPopup() {
-        val bg = UiStyle.Colors.cardBg()
+        val bg = SessionUiStyle.AccountPopup.bgColor()
         val model = CollectionListModel(choices)
         val list = JBList(model).apply {
             selectionMode = ListSelectionModel.SINGLE_SELECTION
@@ -284,7 +285,7 @@ internal class SessionAccountOverlay(
     internal fun choiceCount() = choices.size
     internal fun selectedIndex() = choices.indexOfFirst { it.org == currentOrgId }.takeIf { it >= 0 } ?: 0
     internal fun panelBackground() = panel.background
-    internal fun panelBorderColor() = UiStyle.Colors.cardBorder()
+    internal fun panelBorderColor() = SessionUiStyle.AccountPopup.outlineColor()
     internal fun balanceVisible() = balance.isVisible
     internal fun balanceIcon() = balance.icon
     internal fun balanceText() = balanceText

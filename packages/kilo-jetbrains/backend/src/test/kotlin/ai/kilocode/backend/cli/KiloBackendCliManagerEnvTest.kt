@@ -19,12 +19,15 @@ class KiloBackendCliManagerEnvTest {
         tmp = Files.createTempDirectory("kilo-cli-env-test").toFile()
         System.clearProperty("kilo.dev.storage.isolated")
         System.clearProperty("kilo.dev.worktree.root")
+        System.clearProperty("idea.plugin.in.sandbox.mode")
     }
 
     @AfterTest
     fun tearDown() {
+        KiloClaudeCompatSettings.set(false)
         System.clearProperty("kilo.dev.storage.isolated")
         System.clearProperty("kilo.dev.worktree.root")
+        System.clearProperty("idea.plugin.in.sandbox.mode")
         tmp.deleteRecursively()
     }
 
@@ -36,16 +39,36 @@ class KiloBackendCliManagerEnvTest {
         assertEquals("true", env["KILO_ENABLE_QUESTION_TOOL"])
         assertEquals("jetbrains", env["KILO_PLATFORM"])
         assertEquals("kilo-code", env["KILO_APP_NAME"])
+        assertEquals("all", env["KILO_TELEMETRY_LEVEL"])
         assertEquals("true", env["KILO_DISABLE_CLAUDE_CODE"])
         assertEquals("jetbrains-plugin", env["KILOCODE_FEATURE"])
         assertEquals("pwd123", env["KILO_SERVER_PASSWORD"])
     }
 
     @Test
-    fun `isolation disabled - default CLI config asks for edit and bash permissions`() {
+    fun `dev mode disables CLI telemetry`() {
+        System.setProperty("idea.plugin.in.sandbox.mode", "true")
+
         val env = manager.buildEnv("pwd123", emptyMap())
 
-        assertEquals("""{"permission":{"edit":"ask","bash":"ask"}}""", env["KILO_CONFIG_CONTENT"])
+        assertEquals("off", env["KILO_TELEMETRY_LEVEL"])
+    }
+
+    @Test
+    fun `claude compatibility omits disable env var`() {
+        KiloClaudeCompatSettings.set(true)
+
+        val env = manager.buildEnv("pwd123", emptyMap())
+
+        assertFalse(env.containsKey("KILO_DISABLE_CLAUDE_CODE"))
+    }
+
+    @Test
+    fun `isolation disabled - default CLI config asks for edit permissions without forcing bash`() {
+        val env = manager.buildEnv("pwd123", emptyMap())
+
+        assertEquals("""{"permission":{"edit":"ask"}}""", env["KILO_CONFIG_CONTENT"])
+        assertFalse(env["KILO_CONFIG_CONTENT"]?.contains("bash") == true)
     }
 
     @Test
@@ -55,6 +78,15 @@ class KiloBackendCliManagerEnvTest {
         val env = manager.buildEnv("pwd123", mapOf("KILO_CONFIG_CONTENT" to cfg))
 
         assertEquals(cfg, env["KILO_CONFIG_CONTENT"])
+    }
+
+    @Test
+    fun `isolation disabled - base PATH is preserved`() {
+        val path = "/opt/homebrew/bin:/usr/bin"
+
+        val env = manager.buildEnv("pwd123", mapOf("PATH" to path))
+
+        assertEquals(path, env["PATH"])
     }
 
     @Test
@@ -128,5 +160,52 @@ class KiloBackendCliManagerEnvTest {
         assertFalse(env.containsKey("XDG_CONFIG_HOME"), "XDG_CONFIG_HOME should not be set when root is missing")
         assertFalse(env.containsKey("XDG_STATE_HOME"), "XDG_STATE_HOME should not be set when root is missing")
         assertFalse(env.containsKey("XDG_CACHE_HOME"), "XDG_CACHE_HOME should not be set when root is missing")
+    }
+
+    @Test
+    fun `work dir is created under the provided root`() {
+        val dir = workDir(tmp)
+
+        assertEquals(File(tmp, "cwd"), dir)
+        assertTrue(dir!!.isDirectory, "work dir should be created")
+    }
+
+    @Test
+    fun `work dir is reused when it already exists`() {
+        val first = workDir(tmp)
+        val second = workDir(tmp)
+
+        assertEquals(first, second)
+        assertTrue(second!!.isDirectory, "work dir should still exist on reuse")
+    }
+
+    @Test
+    fun `work dir is returned when the directory was created concurrently`() {
+        // mkdirs() returns false for an already-existing directory; that must not fall back to
+        // the inherited IDE cwd, which is the $HOME resolution this helper exists to prevent.
+        File(tmp, "cwd").mkdirs()
+
+        val dir = workDir(tmp)
+
+        assertEquals(File(tmp, "cwd"), dir)
+    }
+
+    @Test
+    fun `work dir is never home or a filesystem root`() {
+        val dir = workDir(tmp)
+
+        assertTrue(dir != null)
+        assertFalse(dir!!.absolutePath == System.getProperty("user.home"), "work dir must not be the home directory")
+        assertFalse(dir.absolutePath == dir.toPath().root?.toString(), "work dir must not be a filesystem root")
+    }
+
+    @Test
+    fun `work dir returns null when the root cannot be created`() {
+        val blocker = File(tmp, "blocker")
+        blocker.writeText("not a directory")
+
+        val dir = workDir(blocker)
+
+        assertEquals(null, dir)
     }
 }

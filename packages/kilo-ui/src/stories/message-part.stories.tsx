@@ -1,6 +1,7 @@
 /** @jsxImportSource solid-js */
 import type { Meta, StoryObj } from "storybook-solidjs-vite"
 import { UserMessageDisplay, AssistantParts } from "../components/message-part"
+import { AgentAvatarPalette } from "../components/agent-avatar"
 import { DataProvider } from "@opencode-ai/ui/context/data"
 import { DiffComponentProvider } from "@kilocode/kilo-ui/context/diff"
 import { CodeComponentProvider } from "@kilocode/kilo-ui/context/code"
@@ -274,6 +275,68 @@ const mockDataContextGroup = createMockData([completedToolPart, grepCompleted, g
 const mockDataEdit = createMockData([editCompletedPart])
 const mockDataWrite = createMockData([writeCompletedPart])
 
+const boardReadPart: ToolPart = {
+  id: "part-board-read-001",
+  sessionID: SESSION_ID,
+  messageID: ASST_MSG_ID,
+  type: "tool",
+  callID: "call-board-read-001",
+  tool: "board_read",
+  state: {
+    status: "completed",
+    input: {},
+    output: JSON.stringify({
+      messages: [
+        {
+          from: "main",
+          to: "worker",
+          fromLabel: "Coordinator",
+          toLabel: "Worker",
+          body: "**First message**",
+        },
+        {
+          from: "worker",
+          to: "reviewer",
+          fromLabel: "Worker",
+          toLabel: "Reviewer",
+          body: "**Second message**",
+        },
+      ],
+      hasMore: false,
+    }),
+    title: "Read agent messages 2",
+    metadata: {},
+    time: { start: now - 4000, end: now - 3500 },
+  },
+}
+
+const mockDataBoardRead = createMockData([boardReadPart])
+
+const boardBroadcastPart: ToolPart = {
+  id: "part-board-broadcast-001",
+  sessionID: SESSION_ID,
+  messageID: ASST_MSG_ID,
+  type: "tool",
+  callID: "call-board-broadcast-001",
+  tool: "board_post",
+  state: {
+    status: "completed",
+    input: { to: "ALL", type: "INFO", body: "Broadcast update" },
+    output: JSON.stringify({
+      from: "main",
+      to: "ALL",
+      fromLabel: "Coordinator",
+      type: "INFO",
+      body: "Broadcast update",
+    }),
+    title: "INFO to ALL",
+    metadata: { from: "main", to: "ALL", fromLabel: "Coordinator" },
+    time: { start: now - 3000, end: now - 2500 },
+  },
+}
+
+const mockDataBoardBroadcast = createMockData([boardBroadcastPart])
+
 function AllProviders(props: { children: any; data?: MockData; onOpenDiff?: () => void }) {
   return (
     <DataProvider data={props.data ?? mockData} directory="/project" onOpenDiff={props.onOpenDiff}>
@@ -409,6 +472,26 @@ export const WithBashToolExpanded: Story = {
   },
 }
 
+export const WithBoardRead: Story = {
+  render: () => (
+    <AllProviders data={mockDataBoardRead}>
+      <AgentAvatarPalette ids={["worker", "reviewer"]}>
+        <AssistantParts messages={[mockAssistantMessage]} />
+      </AgentAvatarPalette>
+    </AllProviders>
+  ),
+}
+
+export const WithBoardBroadcast: Story = {
+  render: () => (
+    <AllProviders data={mockDataBoardBroadcast}>
+      <AgentAvatarPalette ids={["worker", "reviewer"]}>
+        <AssistantParts messages={[mockAssistantMessage]} />
+      </AgentAvatarPalette>
+    </AllProviders>
+  ),
+}
+
 // --- Three context-group tools + text — exercises ContextToolGroupHeader collapse ---
 
 export const WithContextGroup: Story = {
@@ -529,10 +612,146 @@ const hintErrors: ToolPart[] = [
 
 const mockDataHintErrors = createMockData(hintErrors)
 
+// --- Question tool: answered (reference) ---
+
+const questionAnsweredPart: ToolPart = {
+  id: "part-question-answered",
+  sessionID: SESSION_ID,
+  messageID: ASST_MSG_ID,
+  type: "tool",
+  callID: "call-question-answered",
+  tool: "question",
+  state: {
+    status: "completed",
+    input: {
+      questions: [
+        {
+          question: "Should I continue with this approach?",
+          header: "Continue?",
+          options: [
+            { label: "Yes", description: "Proceed with the current plan" },
+            { label: "No", description: "Stop and reconsider" },
+          ],
+        },
+        {
+          question: "Which library should I use for date formatting?",
+          header: "Library",
+          options: [
+            { label: "date-fns", description: "Lightweight, tree-shakeable" },
+            { label: "luxon", description: "Full-featured DateTime library" },
+            { label: "dayjs", description: "Moment.js compatible, 2kB" },
+          ],
+        },
+      ],
+    },
+    output: 'User answered: "Should I continue?"="Yes", "Which library?"="date-fns"',
+    title: "Asked 2 questions",
+    metadata: { answers: [["Yes"], ["date-fns"]] },
+    time: { start: now - 8000, end: now - 7000 },
+  },
+}
+
+// --- Question tool: dismissed (exercises the fix) ---
+
+const questionDismissedPart: ToolPart = {
+  id: "part-question-dismissed",
+  sessionID: SESSION_ID,
+  messageID: ASST_MSG_ID,
+  type: "tool",
+  callID: "call-question-dismissed",
+  tool: "question",
+  state: {
+    status: "completed",
+    input: {
+      questions: [
+        {
+          question: "Should I continue with this approach?",
+          header: "Continue?",
+          options: [
+            { label: "Yes", description: "Proceed with the current plan" },
+            { label: "No", description: "Stop and reconsider" },
+          ],
+        },
+        {
+          question: "Which library should I use for date formatting?",
+          header: "Library",
+          options: [
+            { label: "date-fns", description: "Lightweight, tree-shakeable" },
+            { label: "luxon", description: "Full-featured DateTime library" },
+          ],
+        },
+      ],
+    },
+    output: "User dismissed the question.",
+    title: "Question dismissed",
+    metadata: { answers: [], dismissed: true },
+    time: { start: now - 8000, end: now - 7000 },
+  },
+}
+
+const mockDataQuestionAnswered = createMockData([questionAnsweredPart, textPart])
+const mockDataQuestionDismissed = createMockData([questionDismissedPart, textPart])
+
 export const ToolHintErrors: Story = {
   render: () => (
     <AllProviders data={mockDataHintErrors}>
       <AssistantParts messages={[mockAssistantMessage]} />
     </AllProviders>
   ),
+}
+
+// --- Question tool: answered (expanded by default) ---
+
+export const QuestionAnswered: Story = {
+  name: "QuestionAnswered",
+  render: () => (
+    <AllProviders data={mockDataQuestionAnswered}>
+      <AssistantParts messages={[mockAssistantMessage]} />
+    </AllProviders>
+  ),
+}
+
+// --- Question tool: answered (manually collapsed) ---
+
+export const QuestionAnsweredCollapsed: Story = {
+  name: "QuestionAnswered (manually collapsed)",
+  render: () => (
+    <AllProviders data={mockDataQuestionAnswered}>
+      <AssistantParts messages={[mockAssistantMessage]} />
+    </AllProviders>
+  ),
+  play: async ({ canvasElement }: { canvasElement: HTMLElement }) => {
+    const trigger = canvasElement
+      .querySelector('[data-slot="basic-tool-tool-title"]')
+      ?.closest("button")
+    if (trigger) trigger.click()
+  },
+}
+
+// --- Question tool: dismissed (collapsed — "2 dismissed" subtitle) ---
+
+export const QuestionDismissed: Story = {
+  name: "QuestionDismissed",
+  render: () => (
+    <AllProviders data={mockDataQuestionDismissed}>
+      <AssistantParts messages={[mockAssistantMessage]} />
+    </AllProviders>
+  ),
+}
+
+// --- Question tool: dismissed (expanded — shows questions with "Dismissed" labels) ---
+
+export const QuestionDismissedExpanded: Story = {
+  name: "QuestionDismissed (expanded)",
+  render: () => (
+    <AllProviders data={mockDataQuestionDismissed}>
+      <AssistantParts messages={[mockAssistantMessage]} />
+    </AllProviders>
+  ),
+  play: async ({ canvasElement }: { canvasElement: HTMLElement }) => {
+    const trigger = canvasElement
+      .querySelector('[data-slot="basic-tool-tool-title"]')
+      ?.closest("button")
+    if (trigger) trigger.click()
+  },
 }

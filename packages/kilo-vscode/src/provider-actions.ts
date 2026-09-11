@@ -9,14 +9,20 @@ import {
   sanitizeCustomProviderConfig,
   withCustomProviderDeletions,
 } from "./shared/custom-provider"
-import { CUSTOM_PROVIDER_PACKAGE, KILO_AUTO, parseModelString } from "./shared/provider-model"
-import { configFeatures } from "./features"
+import { isCustomProviderPackage, KILO_AUTO, KILO_PROVIDER_ID, parseModelString } from "./shared/provider-model"
+import { configFeatures, serverFeatures } from "./features"
 
 /**
  * Compute the default model selection from CLI config, VS Code settings, or hardcoded fallback.
  * Pure function — takes cachedConfig and vscode settings as parameters.
  */
 type AuthState = "api" | "oauth" | "wellknown"
+
+/** API key retained extension-side for authenticated model fetches (#10139). */
+export interface StoredProviderKey {
+  key: string
+  baseURL: string
+}
 
 function disabledWithout(list: string[] | undefined, id: string) {
   return (list ?? []).filter((item) => item !== id)
@@ -27,7 +33,7 @@ function record(value: unknown): value is Record<string, unknown> {
 }
 
 function customProvider(config: unknown) {
-  return record(config) && config.npm === CUSTOM_PROVIDER_PACKAGE
+  return record(config) && isCustomProviderPackage(config.npm)
 }
 
 function same(a: unknown, b: unknown): boolean {
@@ -44,7 +50,7 @@ function same(a: unknown, b: unknown): boolean {
   return akeys.every((key, index) => key === bkeys[index] && same(a[key], b[key]))
 }
 
-/** Fetch auth methods alongside the provider list. Auth states default to empty (endpoint not yet available). */
+/** Fetch provider availability and authentication state without exposing stored credentials. */
 export async function fetchProviderData(client: KiloClient, dir: string) {
   const authRequest =
     typeof client.provider.auth === "function"
@@ -53,23 +59,78 @@ export async function fetchProviderData(client: KiloClient, dir: string) {
           .then((r) => r.data ?? {})
           .catch(() => ({}))
       : Promise.resolve({})
+  const kiloRequest = client.kilo
+    .authStatus({ directory: dir }, { throwOnError: true })
+    .then((r) => r.data)
+    .catch(() => undefined)
 
-  const [{ data: response }, authMethods] = await Promise.all([
+  const [{ data: response }, authMethods, kiloAuth] = await Promise.all([
     client.provider.list({ directory: dir }, { throwOnError: true }),
     authRequest,
+    kiloRequest,
   ])
   const authStates: Record<string, AuthState> = {}
+  const storedKeys: Record<string, StoredProviderKey> = {}
   const all = response.all.map((item) => {
     const raw = item as Record<string, unknown>
     if (typeof raw.id === "string" && typeof raw.key === "string" && raw.key) {
       authStates[raw.id] = "api"
+      // Retain the key on the extension side so model fetches for an existing
+      // provider can authenticate without the webview ever seeing the secret
+      // (#10139). Only providers with a configured baseURL are retained — the
+      // fetch handler requires a URL match before applying a stored key.
+      const options = record(raw.options) ? raw.options : undefined
+      const baseURL = options && typeof options.baseURL === "string" ? options.baseURL : undefined
+      if (baseURL) storedKeys[raw.id] = { key: raw.key, baseURL }
     }
     if (!("key" in raw)) return item
     const next = { ...raw }
     delete next.key
     return next as (typeof response.all)[number]
   })
-  return { response: { ...response, all }, authMethods, authStates }
+  delete authStates[KILO_PROVIDER_ID]
+  if (kiloAuth?.authenticated && kiloAuth.type) authStates[KILO_PROVIDER_ID] = kiloAuth.type
+  const organizationId = kiloAuth ? (kiloAuth.organizationId ?? null) : undefined
+  const defaults = { ...response.default }
+  if (organizationId) {
+    const models = all.find((item) => item.id === KILO_PROVIDER_ID)?.models ?? {}
+    const recommended = response.default[KILO_PROVIDER_ID]
+    const model = recommended && Object.hasOwn(models, recommended) ? recommended : Object.keys(models).at(0)
+    if (model) defaults[KILO_PROVIDER_ID] = model
+    if (!model) delete defaults[KILO_PROVIDER_ID]
+  }
+  if (!kiloAuth) delete defaults[KILO_PROVIDER_ID]
+  return {
+    response: {
+      ...response,
+      all: kiloAuth ? all : all.filter((item) => item.id !== KILO_PROVIDER_ID),
+      connected: kiloAuth ? response.connected : response.connected.filter((id) => id !== KILO_PROVIDER_ID),
+      default: defaults,
+    },
+    authMethods,
+    authStates,
+    storedKeys,
+    organizationId,
+    ready: !!kiloAuth,
+  }
+}
+
+/**
+ * Resolve the stored API key for a model fetch on an existing provider.
+ * The key is only applied when the requested URL matches the provider's
+ * configured baseURL, so a stored secret can never be redirected to a
+ * different host (e.g. after the user edits the URL field).
+ */
+export function resolveStoredKey(
+  storedKeys: Record<string, StoredProviderKey>,
+  providerID: unknown,
+  url: string,
+): string | undefined {
+  if (typeof providerID !== "string" || !providerID) return undefined
+  const stored = storedKeys[providerID]
+  if (!stored) return undefined
+  const normalize = (value: string) => value.trim().replace(/\/+$/, "")
+  return normalize(stored.baseURL) === normalize(url) ? stored.key : undefined
 }
 
 export function buildActionContext(
@@ -201,7 +262,7 @@ async function refreshConfig(ctx: ActionContext, setCachedConfig: SetCachedConfi
     ctx.client.global.config.get({ throwOnError: true }),
   ])
   if (!config) return
-  const features = configFeatures(config)
+  const features = configFeatures(config, await serverFeatures(ctx.client, ctx.workspaceDir))
   setCachedConfig({ type: "configLoaded", config, globalConfig: global, features })
   ctx.postMessage({ type: "configUpdated", config, globalConfig: global, features })
 }
@@ -425,9 +486,10 @@ export async function saveCustomProvider(
 
     const merged = await ctx.client.config.get({ directory: ctx.workspaceDir }, { throwOnError: true })
     const config = merged.data ?? updated
-    const msg = { type: "configLoaded", config, globalConfig: updated, features: configFeatures(config) }
+    const features = configFeatures(config, await serverFeatures(ctx.client, ctx.workspaceDir))
+    const msg = { type: "configLoaded", config, globalConfig: updated, features }
     setCachedConfig(msg)
-    ctx.postMessage({ type: "configUpdated", config, globalConfig: updated, features: configFeatures(config) })
+    ctx.postMessage({ type: "configUpdated", config, globalConfig: updated, features })
 
     const auth = resolveCustomProviderAuth(apiKey, apiKeyChanged)
 

@@ -1,11 +1,12 @@
 import {
   GatewayError,
   fetchCloudSession,
-  fetchCloudSessionForImport,
+  fetchKiloImageModels,
+  fetchKiloTranscriptionModels,
   getCloudSessions,
   getOrganizationId,
   getToken,
-  importSessionToDb,
+  normalizeClawStatus,
 } from "@kilocode/kilo-gateway"
 import {
   HEADER_FEATURE,
@@ -16,6 +17,7 @@ import {
   clearModesCache,
   fetchBalance,
   fetchKilocodeNotifications,
+  fetchKiloPassState,
   fetchOrganizationModes,
   fetchProfile,
 } from "@kilocode/kilo-gateway"
@@ -23,41 +25,74 @@ import { DIRECT_FIM_ENV, requestMistralFim, resolveFimTarget } from "@kilocode/k
 import { DIRECT_EDIT_ENV, extractFencedBody, resolveEditTarget } from "@kilocode/kilo-gateway/edit"
 import { buildMercuryEditPrompt } from "@kilocode/kilo-gateway/edit-prompt"
 import { buildKiloHeaders } from "@kilocode/kilo-gateway"
-import { Effect } from "effect"
+import { Effect, Schema } from "effect"
 import * as Stream from "effect/Stream"
 import { HttpServerRequest, HttpServerResponse } from "effect/unstable/http"
 import { HttpApiBuilder, HttpApiError } from "effect/unstable/httpapi"
+import * as Log from "@opencode-ai/core/util/log"
+import { Flag } from "@opencode-ai/core/flag/flag"
+import { Database } from "@opencode-ai/core/database/database"
+import { KilocodeConfig } from "@/kilocode/config/config"
+import { ClaudeMigration } from "@/kilocode/config/claude-migration"
 import { Auth } from "@/auth"
-import { EffectBridge } from "@/effect/bridge"
-import { Bus } from "@/bus"
-import { Identifier } from "@/id/id"
-import { Instance } from "@/project/instance"
+import { Config } from "@/config/config"
+import { organization as catalogOrganization } from "@/kilocode/provider/catalog"
+import { EventV2Bridge } from "@/event-v2-bridge"
+import { Storage } from "@/storage/storage"
+import { Instance } from "@/kilocode/instance"
 import { InstanceStore } from "@/project/instance-store"
 import { ModelCache } from "@/provider/model-cache"
 import { InstanceHttpApi } from "@/server/routes/instance/httpapi/api"
-import { MessageTable, PartTable, SessionTable } from "@/session/session.sql"
-import { Session } from "@/session/session"
-import { Database } from "@/storage/db"
-import { AudioTranscriptionsBody, EditBody, FimBody } from "../groups/kilo-gateway"
+import { AudioTranscriptionsBody, ClawStatus, CloudSessionImportError, EditBody, FimBody } from "../groups/kilo-gateway"
 
 const FIM_TIMEOUT_MS = 30_000
+const log = Log.create({ service: "kilo-gateway" })
+
+function jsonError(error: string, status: number) {
+  return HttpServerResponse.jsonUnsafe({ error }, { status })
+}
+
+function logError(route: string, err: unknown) {
+  log.error("unhandled error", { route, err })
+}
 
 export const kiloGatewayHandlers = HttpApiBuilder.group(InstanceHttpApi, "kilo", (handlers) =>
   Effect.gen(function* () {
     const auth = yield* Auth.Service
+    const config = yield* Config.Service
     const store = yield* InstanceStore.Service
     const cache = yield* ModelCache.Service
+    const events = yield* EventV2Bridge.Service
+    const database = yield* Database.Service
+    const storage = yield* Storage.Service
 
     const profile = Effect.fn("KiloGatewayHttpApi.profile")(function* () {
       const info = yield* auth.get("kilo").pipe(Effect.mapError(() => new HttpApiError.BadRequest({})))
       if (!info || info.type !== "oauth") return yield* Effect.fail(new HttpApiError.Unauthorized({}))
 
       const currentOrgId = info.accountId ?? null
-      const [profile, balance] = yield* Effect.tryPromise({
-        try: () => Promise.all([fetchProfile(info.access), fetchBalance(info.access, currentOrgId ?? undefined)]),
+      const [profile, balance, kiloPass] = yield* Effect.tryPromise({
+        try: () =>
+          Promise.all([
+            fetchProfile(info.access),
+            fetchBalance(info.access, currentOrgId ?? undefined, log),
+            fetchKiloPassState(info.access),
+          ]),
         catch: () => new HttpApiError.BadRequest({}),
       })
-      return { profile, balance, currentOrgId }
+      return { profile, balance, kiloPass, currentOrgId }
+    })
+
+    const authStatus = Effect.fn("KiloGatewayHttpApi.authStatus")(function* () {
+      const info = yield* auth.get("kilo").pipe(Effect.mapError(() => new HttpApiError.BadRequest({})))
+      const cfg = yield* config.get()
+      const organizationId = catalogOrganization(cfg.provider?.kilo?.options, info)
+      const type = getToken(info) && (info?.type === "api" || info?.type === "oauth") ? info.type : undefined
+      return {
+        authenticated: !!type,
+        ...(type ? { type } : {}),
+        ...(organizationId == null ? {} : { organizationId }),
+      }
     })
 
     const proxyAuth = Effect.fn("KiloGatewayHttpApi.proxyAuth")(function* () {
@@ -158,14 +193,17 @@ export const kiloGatewayHandlers = HttpApiBuilder.group(InstanceHttpApi, "kilo",
 
     const edit = Effect.fn("KiloGatewayHttpApi.edit")(function* (ctx: { payload: typeof EditBody.Type }) {
       const target = resolveEditTarget(ctx.payload.provider, ctx.payload.model)
-      if (target.provider !== "inception") {
+      if (target.provider === "kilo" && !target.url) {
         return yield* Effect.fail(new HttpApiError.BadRequest({}))
       }
+      const proxy = target.provider === "kilo" ? yield* proxyAuth() : undefined
       const token = yield* Effect.gen(function* () {
+        if (target.provider === "kilo") return proxy?.token
         const item = yield* auth.get(target.provider).pipe(Effect.mapError(() => new HttpApiError.Unauthorized({})))
         if (item?.type === "api") return item.key
         return DIRECT_EDIT_ENV[target.provider].map((key) => process.env[key]).find(Boolean)
       })
+      if (target.provider === "kilo" && !proxy?.auth) return yield* Effect.fail(new HttpApiError.Unauthorized({}))
       if (!token) return yield* Effect.fail(new HttpApiError.Unauthorized({}))
 
       const request = yield* HttpServerRequest.HttpServerRequest
@@ -188,37 +226,57 @@ export const kiloGatewayHandlers = HttpApiBuilder.group(InstanceHttpApi, "kilo",
       })
 
       const response = yield* Effect.promise(async () => {
-        return fetch(target.url, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${token}`,
-          },
-          signal,
-          body: JSON.stringify({
-            model: target.model,
-            max_tokens: ctx.payload.maxTokens ?? 512,
-            // Mercury rejects role:"system" on this endpoint — must be a single user message.
-            messages: [{ role: "user", content }],
-          }),
-        })
+        try {
+          return await fetch(target.url, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${token}`,
+              ...(target.provider === "kilo"
+                ? buildKiloHeaders(undefined, { kilocodeOrganizationId: proxy?.organizationId })
+                : {}),
+              ...(target.provider === "kilo" ? { [HEADER_FEATURE]: "autocomplete" } : {}),
+            },
+            signal,
+            body: JSON.stringify({
+              model: target.model,
+              max_tokens: ctx.payload.maxTokens ?? 512,
+              // Mercury rejects role:"system" on this endpoint — must be a single user message.
+              messages: [{ role: "user", content }],
+            }),
+          })
+        } catch (err) {
+          if (err instanceof DOMException && err.name === "TimeoutError")
+            return Response.json({ error: "Edit request timed out" }, { status: 504 })
+          if (signal.aborted) return Response.json({ error: "Edit request canceled" }, { status: 499 })
+          throw err
+        }
       })
 
       if (!response.ok) {
         // Pass the upstream status through (mirrors the FIM handler) so the
         // client can distinguish auth/credit/rate-limit/server failures
         // instead of collapsing everything to 400.
-        const text = yield* Effect.promise(() => response.text())
+        const text = yield* Effect.promise(async () => {
+          try {
+            return await response.text()
+          } catch {
+            return "<unreadable>"
+          }
+        })
         return HttpServerResponse.jsonUnsafe(
           { error: `Edit request failed: ${response.status} ${text}` },
           { status: response.status },
         )
       }
 
-      const json = yield* Effect.promise(() => response.json() as Promise<{
-        choices?: Array<{ message?: { content?: string } }>
-        usage?: { prompt_tokens?: number; completion_tokens?: number }
-      }>)
+      const json = yield* Effect.promise(
+        () =>
+          response.json() as Promise<{
+            choices?: Array<{ message?: { content?: string } }>
+            usage?: { prompt_tokens?: number; completion_tokens?: number }
+          }>,
+      )
       const raw = json.choices?.[0]?.message?.content ?? ""
       const body = extractFencedBody(raw)
       return {
@@ -263,16 +321,26 @@ export const kiloGatewayHandlers = HttpApiBuilder.group(InstanceHttpApi, "kilo",
     })
 
     const notifications = Effect.fn("KiloGatewayHttpApi.notifications")(function* () {
-      const info = yield* auth.get("kilo").pipe(Effect.mapError(() => new HttpApiError.BadRequest({})))
-      const token = getToken(info)
-      if (!token) return []
+      // Locally-detected notice about leftover opencode config; appended so it reuses each client's dismissal path.
+      const notice = KilocodeConfig.opencodeConfigNotification({
+        directory: Instance.directory,
+        worktree: Instance.worktree,
+        scanProject: !Flag.KILO_DISABLE_PROJECT_CONFIG,
+      })
+      const claude = yield* Effect.promise(() => ClaudeMigration.notification())
+      const append = <T>(list: T[]) => [...list, ...(notice ? [notice] : []), ...(claude ? [claude] : [])]
 
-      return yield* Effect.promise(() =>
+      const info = yield* auth.get("kilo").pipe(Effect.catch(() => Effect.succeed(undefined)))
+      const token = getToken(info)
+      if (!token) return append([])
+
+      const cloud = yield* Effect.promise(() =>
         fetchKilocodeNotifications({
           kilocodeToken: token,
           kilocodeOrganizationId: getOrganizationId(info),
         }),
       )
+      return append(cloud)
     })
 
     const organization = Effect.fn("KiloGatewayHttpApi.organization")(function* (ctx) {
@@ -311,13 +379,20 @@ export const kiloGatewayHandlers = HttpApiBuilder.group(InstanceHttpApi, "kilo",
         try: async () => {
           const response = await fetch(`${KILO_API_BASE}/api/kiloclaw/status`, { headers })
           if (!response.ok) throw new GatewayError(await response.text(), response.status)
-          return response.json()
+          return Schema.decodeUnknownPromise(ClawStatus)(normalizeClawStatus(await response.json()))
         },
-        catch: (err) =>
-          err instanceof GatewayError && err.status === 401
-            ? new HttpApiError.Unauthorized({})
-            : new HttpApiError.ServiceUnavailable({}),
-      })
+        catch: (err) => err,
+      }).pipe(
+        Effect.match({
+          onFailure: (err) => {
+            if (err instanceof GatewayError)
+              return jsonError(`KiloClaw request failed: ${err.status} ${err.message}`, err.status)
+            logError("claw/status", err)
+            return jsonError("Failed to reach KiloClaw", 502)
+          },
+          onSuccess: (result) => result,
+        }),
+      )
     })
 
     const clawChatCredentials = Effect.fn("KiloGatewayHttpApi.clawChatCredentials")(function* () {
@@ -346,11 +421,17 @@ export const kiloGatewayHandlers = HttpApiBuilder.group(InstanceHttpApi, "kilo",
 
       return yield* Effect.tryPromise({
         try: () => getCloudSessions(token, query),
-        catch: (err) =>
-          err instanceof GatewayError && err.status === 401
-            ? new HttpApiError.Unauthorized({})
-            : new HttpApiError.BadRequest({}),
-      })
+        catch: (err) => err,
+      }).pipe(
+        Effect.match({
+          onFailure: (err) => {
+            if (err instanceof GatewayError) return jsonError(err.message, err.status)
+            logError("cloud-sessions", err)
+            return jsonError("Internal error", 500)
+          },
+          onSuccess: (result) => result,
+        }),
+      )
     })
 
     const cloudSession = Effect.fn("KiloGatewayHttpApi.cloudSession")(function* (ctx) {
@@ -358,50 +439,117 @@ export const kiloGatewayHandlers = HttpApiBuilder.group(InstanceHttpApi, "kilo",
       const token = getToken(info)
       if (!token) return yield* Effect.fail(new HttpApiError.Unauthorized({}))
 
-      const result = yield* Effect.promise(() => fetchCloudSession(token, ctx.params.id))
-      if (!result.ok && result.status === 404) return yield* Effect.fail(new HttpApiError.NotFound({}))
-      if (!result.ok) return yield* Effect.fail(new HttpApiError.Unauthorized({}))
+      const result = yield* Effect.tryPromise({
+        try: () => fetchCloudSession(token, ctx.params.id),
+        catch: (err) => err,
+      }).pipe(
+        Effect.catch((err) =>
+          Effect.sync(() => {
+            logError("cloud/session/get", err)
+            return undefined
+          }),
+        ),
+      )
+      if (!result) return jsonError("Internal error", 500)
+      if (!result.ok) return jsonError(result.error, result.status)
       return result.data
     })
 
     const cloudSessionImport = Effect.fn("KiloGatewayHttpApi.cloudSessionImport")(function* (ctx) {
-      const info = yield* auth.get("kilo").pipe(Effect.mapError(() => new HttpApiError.Unauthorized({})))
-      const token = getToken(info)
-      if (!token) return yield* Effect.fail(new HttpApiError.Unauthorized({}))
+      // Load the helper lazily: a static top-level import pulls the HTTP
+      // handler graph into the remote-sender module graph and breaks the
+      // create_session test's module init. Run the helper's Effect on the
+      // request Effect (yield*) so the request-scoped InstanceRef/WorkspaceRef
+      // reach the persistence path instead of the AppRuntime default context.
+      const { CloudSessionImportInProcess } = yield* Effect.promise(() =>
+        import("@/kilocode/server/import-cloud-session-in-process"),
+      )
+      const outcome = yield* CloudSessionImportInProcess.importSession(ctx.payload.sessionId).pipe(
+        Effect.provideService(Auth.Service, auth),
+        Effect.provideService(EventV2Bridge.Service, events),
+        Effect.provideService(Database.Service, database),
+        Effect.provideService(Storage.Service, storage),
+        Effect.match({
+          onFailure: (err) => {
+            if (err instanceof CloudSessionImportInProcess.Unauthorized) return { tag: "unauthorized" as const }
+            if (err instanceof CloudSessionImportInProcess.Upstream) {
+              return { tag: "upstream" as const, error: err.error, status: err.status }
+            }
+            if (err instanceof CloudSessionImportInProcess.BadRequest) return { tag: "badrequest" as const }
+            return { tag: "internal" as const }
+          },
+          onSuccess: (session) => ({ tag: "ok" as const, session }),
+        }),
+      )
+      switch (outcome.tag) {
+        case "unauthorized":
+          return yield* Effect.fail(new HttpApiError.Unauthorized({}))
+        case "upstream":
+          return jsonError(outcome.error, outcome.status)
+        case "badrequest":
+          return yield* Effect.fail(new HttpApiError.BadRequest({}))
+        case "internal":
+          return yield* Effect.fail(new CloudSessionImportError({ error: "Internal error" }))
+        case "ok":
+          return outcome.session
+      }
+    })
 
-      const fetched = yield* Effect.promise(() => fetchCloudSessionForImport(token, ctx.payload.sessionId))
-      if (!fetched.ok && fetched.status === 404) return yield* Effect.fail(new HttpApiError.NotFound({}))
-      if (!fetched.ok) return yield* Effect.fail(new HttpApiError.BadRequest({}))
-      if (!fetched.data?.info?.id) return yield* Effect.fail(new HttpApiError.BadRequest({}))
+    const imageModels = Effect.fn("KiloGatewayHttpApi.imageModels")(function* () {
+      const info = yield* proxyAuth()
+      if (!info.auth) return yield* Effect.fail(new HttpApiError.Unauthorized({}))
+      if (!info.token) return yield* Effect.fail(new HttpApiError.Unauthorized({}))
 
-      const bridge = yield* EffectBridge.make()
-      return yield* Effect.tryPromise({
+      const result = yield* Effect.tryPromise({
         try: () =>
-          bridge.promise(
-            Effect.sync(() =>
-              importSessionToDb(fetched.data, {
-                Database,
-                Instance,
-                SessionTable,
-                MessageTable,
-                PartTable,
-                SessionToRow: Session.toRow,
-                Bus,
-                SessionCreatedEvent: Session.Event.Created,
-                Identifier,
-              }),
-            ),
-          ),
+          fetchKiloImageModels({
+            kilocodeToken: info.token,
+            kilocodeOrganizationId: info.organizationId,
+          }),
         catch: () => new HttpApiError.BadRequest({}),
       })
+
+      if (result.error) {
+        const err =
+          result.error.kind === "unauthorized" ? new HttpApiError.Unauthorized({}) : new HttpApiError.BadRequest({})
+        return yield* Effect.fail(err)
+      }
+
+      return result.models
+    })
+
+    const transcriptionModels = Effect.fn("KiloGatewayHttpApi.transcriptionModels")(function* () {
+      const info = yield* proxyAuth()
+      if (!info.auth) return yield* Effect.fail(new HttpApiError.Unauthorized({}))
+      if (!info.token) return yield* Effect.fail(new HttpApiError.Unauthorized({}))
+
+      const result = yield* Effect.tryPromise({
+        try: () =>
+          fetchKiloTranscriptionModels({
+            kilocodeToken: info.token,
+            kilocodeOrganizationId: info.organizationId,
+          }),
+        catch: () => new HttpApiError.BadRequest({}),
+      })
+
+      if (result.error) {
+        const err =
+          result.error.kind === "unauthorized" ? new HttpApiError.Unauthorized({}) : new HttpApiError.BadRequest({})
+        return yield* Effect.fail(err)
+      }
+
+      return result.models
     })
 
     return handlers
       .handle("profile", profile)
+      .handle("authStatus", authStatus)
       .handle("modes", modes)
       .handle("fim", fim)
       .handle("edit", edit)
       .handle("audioTranscriptions", audioTranscriptions)
+      .handle("imageModels", imageModels)
+      .handle("transcriptionModels", transcriptionModels)
       .handle("notifications", notifications)
       .handle("organization", organization)
       .handle("clawStatus", clawStatus)

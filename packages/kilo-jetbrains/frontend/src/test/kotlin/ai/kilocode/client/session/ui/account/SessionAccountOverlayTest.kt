@@ -3,8 +3,8 @@ package ai.kilocode.client.session.ui.account
 import ai.kilocode.client.session.controller.SessionControllerEvent
 import ai.kilocode.client.session.controller.SessionControllerEvent.AccountOverlaySnapshot
 import ai.kilocode.client.session.controller.SessionControllerTestBase
+import ai.kilocode.client.session.ui.style.SessionUiStyle
 import ai.kilocode.client.ui.FilledBadgeIcon
-import ai.kilocode.client.ui.UiStyle
 import ai.kilocode.rpc.dto.KiloAppStatusDto
 import ai.kilocode.rpc.dto.ProfileBalanceDto
 import ai.kilocode.rpc.dto.ProfileDto
@@ -42,10 +42,12 @@ class SessionAccountOverlayTest : SessionControllerTestBase() {
         organizations: List<ProfileOrganizationDto> = emptyList(),
         balance: ProfileBalanceDto? = null,
         currentOrgId: String? = null,
+        hasPersonalAccount: Boolean = true,
     ) = ProfileDto(
         email = email,
         name = name,
         organizations = organizations,
+        hasPersonalAccount = hasPersonalAccount,
         balance = balance,
         currentOrgId = currentOrgId,
     )
@@ -103,6 +105,22 @@ class SessionAccountOverlayTest : SessionControllerTestBase() {
             assertEquals(2, panel.choiceCount())
             // selected index is 1 (org_1 is the second item)
             assertEquals(1, panel.selectedIndex())
+        }
+    }
+
+    fun `test profile without personal account hides personal choice`() {
+        val acme = org("org_1", "Acme", "MEMBER")
+        val prof = profile(
+            email = "user@example.com",
+            organizations = listOf(acme),
+            currentOrgId = "org_1",
+            hasPersonalAccount = false,
+        )
+        show(snap(prof))
+        edt {
+            assertEquals("Acme", panel.accountTitle())
+            assertEquals(1, panel.choiceCount())
+            assertEquals(0, panel.selectedIndex())
         }
     }
 
@@ -201,12 +219,12 @@ class SessionAccountOverlayTest : SessionControllerTestBase() {
         }
     }
 
-    fun `test account switcher uses card background and border`() {
+    fun `test account switcher uses session view background and border`() {
         val prof = profile(email = "user@example.com")
         show(snap(prof))
         edt {
-            assertEquals(UiStyle.Colors.cardBg(), panel.panelBackground())
-            assertEquals(UiStyle.Colors.cardBorder(), panel.panelBorderColor())
+            assertEquals(SessionUiStyle.AccountPopup.bgColor(), panel.panelBackground())
+            assertEquals(SessionUiStyle.AccountPopup.outlineColor(), panel.panelBorderColor())
         }
     }
 

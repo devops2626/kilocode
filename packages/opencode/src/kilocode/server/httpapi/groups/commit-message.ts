@@ -2,7 +2,10 @@ import { Schema } from "effect"
 import { HttpApi, HttpApiEndpoint, HttpApiError, HttpApiGroup, OpenApi } from "effect/unstable/httpapi"
 import { Authorization } from "@/server/routes/instance/httpapi/middleware/authorization"
 import { InstanceContextMiddleware } from "@/server/routes/instance/httpapi/middleware/instance-context"
-import { WorkspaceRoutingMiddleware } from "@/server/routes/instance/httpapi/middleware/workspace-routing"
+import {
+  WorkspaceRoutingMiddleware,
+  WorkspaceRoutingQuery,
+} from "@/server/routes/instance/httpapi/middleware/workspace-routing"
 import { described } from "@/server/routes/instance/httpapi/groups/metadata"
 
 const root = "/commit-message"
@@ -15,20 +18,33 @@ export const CommitMessagePayload = Schema.Struct({
   previousMessage: Schema.optional(Schema.String).annotate({
     description: "Previously generated message — triggers regeneration with a different result",
   }),
+  language: Schema.optional(Schema.String).annotate({
+    description: "Target language for the generated commit message (e.g. zh, en). Falls back to English.",
+  }),
 })
 
 const CommitMessageResponse = Schema.Struct({
   message: Schema.String,
 })
 
+export class CommitMessageNoChangesError extends Schema.ErrorClass<CommitMessageNoChangesError>(
+  "CommitMessageNoChangesError",
+)({ message: Schema.String }, { httpApiStatus: 422 }) {}
+
+export class CommitMessageFailedError extends Schema.ErrorClass<CommitMessageFailedError>("CommitMessageFailedError")(
+  { message: Schema.String },
+  { httpApiStatus: 422 },
+) {}
+
 export const CommitMessageApi = HttpApi.make("commit-message")
   .add(
     HttpApiGroup.make("commit-message")
       .add(
         HttpApiEndpoint.post("generate", root, {
+          query: WorkspaceRoutingQuery,
           payload: CommitMessagePayload,
           success: described(CommitMessageResponse, "Generated commit message"),
-          error: HttpApiError.BadRequest,
+          error: [HttpApiError.BadRequest, CommitMessageNoChangesError, CommitMessageFailedError],
         }).annotateMerge(
           OpenApi.annotations({
             identifier: "commitMessage.generate",

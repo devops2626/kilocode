@@ -12,6 +12,12 @@ import { useLanguage } from "../../context/language"
 import { useProvider } from "../../context/provider"
 import { useVSCode } from "../../context/vscode"
 import { createProviderAction } from "../../utils/provider-action"
+import {
+  ATOMIC_CHAT_PROVIDER_KEY,
+  isLocalProviderOptionalApiKey,
+  LOCAL_PROVIDER_API_KEY_PLACEHOLDER,
+} from "../../utils/local-providers"
+import AnacondaDesktopDialog from "./AnacondaDesktopDialog"
 
 interface ProviderConnectDialogProps {
   providerID: string
@@ -28,10 +34,6 @@ interface ViewState {
 }
 
 type Prompt = NonNullable<ProviderAuthMethod["prompts"]>[number]
-
-function fallbackMethods(label: string): ProviderAuthMethod[] {
-  return [{ type: "api", label }]
-}
 
 function formatError(value: unknown, fallback: string): string {
   if (value && typeof value === "object" && "message" in value) {
@@ -51,6 +53,8 @@ function visible(prompt: Prompt, values: Record<string, string>) {
 }
 
 const ProviderConnectDialog: Component<ProviderConnectDialogProps> = (props) => {
+  if (props.providerID === "anaconda-desktop") return <AnacondaDesktopDialog />
+
   const dialog = useDialog()
   const language = useLanguage()
   const provider = useProvider()
@@ -62,8 +66,61 @@ const ProviderConnectDialog: Component<ProviderConnectDialogProps> = (props) => 
   const item = createMemo(() => provider.providers()[props.providerID])
   const name = () => item()?.name ?? props.providerID
   const methods = createMemo<ProviderAuthMethod[]>(() => {
-    const list =
-      provider.authMethods()[props.providerID] ?? fallbackMethods(language.t("provider.connect.method.apiKey"))
+    const fallback = (): ProviderAuthMethod[] => {
+      if (props.providerID === "amazon-bedrock") {
+        return [
+          {
+            type: "api",
+            label: language.t("provider.connect.bedrock.method.accessKeys"),
+            prompts: [
+              {
+                type: "text",
+                key: "secretAccessKey",
+                message: language.t("provider.connect.bedrock.secretAccessKey.label"),
+                placeholder: language.t("provider.connect.bedrock.secretAccessKey.placeholder"),
+              },
+              {
+                type: "text",
+                key: "sessionToken",
+                message: language.t("provider.connect.bedrock.sessionToken.label"),
+                placeholder: language.t("provider.connect.bedrock.sessionToken.placeholder"),
+              },
+              {
+                type: "text",
+                key: "region",
+                message: language.t("provider.connect.bedrock.region.label"),
+                placeholder: language.t("provider.connect.bedrock.region.placeholder"),
+              },
+            ],
+          },
+          { type: "api", label: language.t("provider.connect.bedrock.method.apiKey") },
+        ]
+      }
+      if (props.providerID === "google-vertex") {
+        return [
+          {
+            type: "api",
+            label: language.t("provider.connect.vertex.method.serviceAccount"),
+            prompts: [
+              {
+                type: "text",
+                key: "project",
+                message: language.t("provider.connect.vertex.project.label"),
+                placeholder: language.t("provider.connect.vertex.project.placeholder"),
+              },
+              {
+                type: "text",
+                key: "location",
+                message: language.t("provider.connect.vertex.location.label"),
+                placeholder: language.t("provider.connect.vertex.location.placeholder"),
+              },
+            ],
+          },
+        ]
+      }
+      return [{ type: "api", label: language.t("provider.connect.method.apiKey") }]
+    }
+    const list = provider.authMethods()[props.providerID] ?? fallback()
     if (props.oauthOnly) return list.filter((item) => item.type === "oauth")
     return list
   })
@@ -71,6 +128,15 @@ const ProviderConnectDialog: Component<ProviderConnectDialogProps> = (props) => 
     const index = state.methodIndex
     return index === undefined ? undefined : methods()[index]
   })
+  const bedrockKeys = () =>
+    props.providerID === "amazon-bedrock" && method()?.prompts?.some((prompt) => prompt.key === "secretAccessKey")
+  const vertexCredentials = () => props.providerID === "google-vertex" && method()?.type === "api"
+
+  function optional(prompt: Prompt) {
+    if (bedrockKeys() && prompt.key === "sessionToken") return true
+    if (vertexCredentials() && prompt.key === "project") return true
+    return false
+  }
 
   function promptLabel(prompt: Prompt) {
     if (props.providerID === "azure" && prompt.key === "endpointType") {
@@ -265,7 +331,7 @@ const ProviderConnectDialog: Component<ProviderConnectDialogProps> = (props) => 
           <For each={methods()}>
             {(item, index) => (
               <Button variant="secondary" size="large" onClick={() => selectMethod(index())}>
-                {item.type === "api" ? language.t("provider.connect.method.apiKey") : item.label}
+                {item.type === "api" ? item.label || language.t("provider.connect.method.apiKey") : item.label}
               </Button>
             )}
           </For>
@@ -283,18 +349,71 @@ const ProviderConnectDialog: Component<ProviderConnectDialogProps> = (props) => 
     const [value, setValue] = createSignal("")
     const [fields, setFields] = createStore<Record<string, string>>({})
     const prompts = createMemo(() => method()?.prompts?.filter((prompt) => visible(prompt, fields)) ?? [])
+    const apiKeyOptional = () => isLocalProviderOptionalApiKey(props.providerID)
+
+    function apiKeyDescription() {
+      if (bedrockKeys()) {
+        return language.t("provider.connect.bedrock.description")
+      }
+      if (vertexCredentials()) {
+        return language.t("provider.connect.vertex.description")
+      }
+      if (props.providerID === ATOMIC_CHAT_PROVIDER_KEY) {
+        return language.t("provider.connect.atomicChat.description")
+      }
+      if (apiKeyOptional()) {
+        return language.t("provider.connect.apiKey.description.local", { provider: name() })
+      }
+      return language.t("provider.connect.apiKey.description", { provider: name() })
+    }
+
+    function apiKeyLabel() {
+      if (bedrockKeys()) {
+        return language.t("provider.connect.bedrock.accessKeyId.label")
+      }
+      if (vertexCredentials()) {
+        return language.t("provider.connect.vertex.credentials.label")
+      }
+      if (apiKeyOptional()) {
+        return language.t("provider.connect.apiKey.label.optional", { provider: name() })
+      }
+      return language.t("provider.connect.apiKey.label", { provider: name() })
+    }
+
+    function apiKeyRequired() {
+      if (bedrockKeys()) return language.t("provider.connect.bedrock.accessKeyId.required")
+      if (vertexCredentials()) return language.t("provider.connect.vertex.credentials.required")
+      return language.t("provider.connect.apiKey.required")
+    }
 
     function submit(e: SubmitEvent) {
       e.preventDefault()
-      const apiKey = value().trim()
+      const trimmed = value().trim()
+      const apiKey = trimmed || (apiKeyOptional() ? LOCAL_PROVIDER_API_KEY_PLACEHOLDER : "")
       if (!apiKey) {
-        setState({ ...state, error: language.t("provider.connect.apiKey.required"), field: "apiKey" })
+        setState({ ...state, error: apiKeyRequired(), field: "apiKey" })
+        return
+      }
+      const serviceAccount = (() => {
+        if (!vertexCredentials()) return undefined
+        try {
+          const parsed = JSON.parse(apiKey) as Record<string, unknown>
+          if (parsed.type !== "service_account") return undefined
+          if (typeof parsed.client_email !== "string" || !parsed.client_email.trim()) return undefined
+          if (typeof parsed.private_key !== "string" || !parsed.private_key.trim()) return undefined
+          return parsed
+        } catch {
+          return undefined
+        }
+      })()
+      if (vertexCredentials() && !serviceAccount) {
+        setState({ ...state, error: language.t("provider.connect.vertex.credentials.invalid"), field: "apiKey" })
         return
       }
       const metadata: Record<string, string> = {}
       for (const prompt of prompts()) {
         const field = (fields[prompt.key] ?? "").trim()
-        if (!field) {
+        if (!field && !optional(prompt)) {
           setState({
             ...state,
             error: language.t("provider.connect.prompt.required", { field: promptLabel(prompt) }),
@@ -302,8 +421,23 @@ const ProviderConnectDialog: Component<ProviderConnectDialogProps> = (props) => 
           })
           return
         }
+        if (!field) continue
         metadata[prompt.key] = field
       }
+      if (
+        vertexCredentials() &&
+        !metadata.project &&
+        !(typeof serviceAccount?.project_id === "string" && serviceAccount.project_id.trim())
+      ) {
+        setState({
+          ...state,
+          error: language.t("provider.connect.vertex.project.required"),
+          field: "project",
+        })
+        return
+      }
+      if (bedrockKeys()) metadata.authType = "accessKey"
+      if (vertexCredentials()) metadata.authType = "serviceAccount"
       connect(apiKey, Object.keys(metadata).length > 0 ? metadata : undefined)
     }
 
@@ -313,14 +447,27 @@ const ProviderConnectDialog: Component<ProviderConnectDialogProps> = (props) => 
         style={{ display: "flex", "flex-direction": "column", gap: "16px" }}
         onSubmit={submit}
       >
-        <div class="provider-connect-body">
-          {language.t("provider.connect.apiKey.description", { provider: name() })}
-        </div>
+        <div class="provider-connect-body">{apiKeyDescription()}</div>
         <TextField
           autofocus
-          type="password"
-          label={language.t("provider.connect.apiKey.label", { provider: name() })}
-          placeholder={language.t("provider.connect.apiKey.placeholder")}
+          type={vertexCredentials() ? "text" : "password"}
+          multiline={vertexCredentials()}
+          style={{
+            "max-height": vertexCredentials() ? "min(240px, 35vh)" : undefined,
+            "overflow-y": vertexCredentials() ? "auto" : undefined,
+          }}
+          autocomplete="off"
+          spellcheck={false}
+          label={apiKeyLabel()}
+          placeholder={
+            bedrockKeys()
+              ? language.t("provider.connect.bedrock.accessKeyId.placeholder")
+              : vertexCredentials()
+                ? language.t("provider.connect.vertex.credentials.placeholder")
+                : apiKeyOptional()
+                  ? language.t("provider.connect.apiKey.placeholder.optional")
+                  : language.t("provider.connect.apiKey.placeholder")
+          }
           value={value()}
           onChange={setValue}
           validationState={state.field === "apiKey" ? "invalid" : undefined}
@@ -331,7 +478,9 @@ const ProviderConnectDialog: Component<ProviderConnectDialogProps> = (props) => 
             <Switch>
               <Match when={prompt.type === "text"}>
                 <TextField
-                  type="text"
+                  type={bedrockKeys() && ["secretAccessKey", "sessionToken"].includes(prompt.key) ? "password" : "text"}
+                  autocomplete="off"
+                  spellcheck={false}
                   label={promptLabel(prompt)}
                   placeholder={promptPlaceholder(prompt)}
                   value={fields[prompt.key] ?? ""}

@@ -4,41 +4,50 @@
 // transitively load flag.ts to ensure the env is captured at load time.
 process.env.KILO_SESSION_RETRY_LIMIT = "2"
 
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+import { SessionProjector } from "@opencode-ai/core/session/projector"
 import { NodeFileSystem } from "@effect/platform-node"
 import { afterEach, describe, expect, spyOn } from "bun:test"
 import { APICallError } from "ai"
 import { Context, Effect, Layer } from "effect"
 import * as Stream from "effect/Stream"
+import type { LLMEvent } from "@opencode-ai/llm"
+import { Database } from "@opencode-ai/core/database/database"
 import path from "path"
 import { Agent as AgentSvc } from "../../src/agent/agent"
 import { Bus } from "../../src/bus"
 import { Config } from "../../src/config/config"
+import { RuntimeFlags } from "../../src/effect/runtime-flags"
+import { EventV2Bridge } from "../../src/event-v2-bridge"
+import { Image } from "../../src/image/image"
 import { Permission } from "../../src/permission"
 import { Plugin } from "../../src/plugin"
 import type { Provider } from "../../src/provider/provider"
-import { ModelID, ProviderID } from "../../src/provider/schema"
+import { ProviderV2 } from "@opencode-ai/core/provider"
+import { ModelV2 } from "@opencode-ai/core/model"
 import { Session } from "../../src/session/session"
 import { LLM } from "../../src/session/llm"
 import { MessageV2 } from "../../src/session/message-v2"
 import { SessionProcessor } from "../../src/session/processor"
 import { SessionRetry } from "../../src/session/retry"
-import { MessageID, PartID, SessionID } from "../../src/session/schema"
+import { MessageID } from "../../src/session/schema"
 import { SessionStatus } from "../../src/session/status"
 import { SessionSummary } from "../../src/session/summary"
 import { Snapshot } from "../../src/snapshot"
+import { SyncEvent } from "../../src/sync"
 import * as Log from "@opencode-ai/core/util/log"
 import * as CrossSpawnSpawner from "@opencode-ai/core/cross-spawn-spawner"
-import { provideTmpdirInstance } from "../fixture/fixture"
+import { provideTmpdirProject } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
 
 Log.init({ print: false })
 
 const ref = {
-  providerID: ProviderID.make("test"),
-  modelID: ModelID.make("test-model"),
+  providerID: ProviderV2.ID.make("test"),
+  modelID: ModelV2.ID.make("test-model"),
 }
 
-type Script = Stream.Stream<LLM.Event, unknown>
+type Script = Stream.Stream<LLMEvent, unknown>
 
 class TestLLM extends Context.Service<
   TestLLM,
@@ -47,6 +56,8 @@ class TestLLM extends Context.Service<
     readonly calls: Effect.Effect<number>
   }
 >()("@test/RetryLimitLLM") {}
+
+class State extends Context.Service<State, { readonly queue: Script[]; calls: number }>()("@test/RetryLimitLLMState") {}
 
 function model(): Provider.Model {
   return {
@@ -79,44 +90,65 @@ function retryable429() {
   })
 }
 
-const llm = Layer.unwrap(
-  Effect.gen(function* () {
-    const queue: Script[] = []
-    let calls = 0
-    const push = (item: Script) => {
-      queue.push(item)
-      return Effect.void
-    }
-    return Layer.mergeAll(
-      Layer.succeed(
-        LLM.Service,
-        LLM.Service.of({
-          stream: () => {
-            calls += 1
-            const item = queue.shift() ?? Stream.fail(new Error("unexpected extra llm call"))
-            return item
-          },
-        }),
-      ),
-      Layer.succeed(TestLLM, TestLLM.of({ push, calls: Effect.sync(() => calls) })),
-    )
-  }),
-)
-
-const status = SessionStatus.layer.pipe(Layer.provideMerge(Bus.layer))
-const infra = Layer.mergeAll(NodeFileSystem.layer, CrossSpawnSpawner.defaultLayer)
-const deps = Layer.mergeAll(
-  Session.defaultLayer,
-  Snapshot.defaultLayer,
-  AgentSvc.defaultLayer,
-  Permission.defaultLayer,
-  Plugin.defaultLayer,
-  Config.defaultLayer,
-  SessionSummary.defaultLayer,
-  status,
-  llm,
-).pipe(Layer.provideMerge(infra))
-const env = SessionProcessor.layer.pipe(Layer.provideMerge(deps))
+const stateNode = LayerNode.make({
+  service: State,
+  layer: Layer.sync(State, () => State.of({ queue: [], calls: 0 })),
+  deps: [],
+})
+const llmNode = LayerNode.make({
+  service: LLM.Service,
+  layer: Layer.effect(
+    LLM.Service,
+    Effect.gen(function* () {
+      const state = yield* State
+      return LLM.Service.of({
+        stream: () => {
+          state.calls += 1
+          return state.queue.shift() ?? Stream.fail(new Error("unexpected extra llm call"))
+        },
+      })
+    }),
+  ),
+  deps: [stateNode],
+})
+const testNode = LayerNode.make({
+  service: TestLLM,
+  layer: Layer.effect(
+    TestLLM,
+    Effect.gen(function* () {
+      const state = yield* State
+      return TestLLM.of({
+        push: (item) => Effect.sync(() => state.queue.push(item)).pipe(Effect.asVoid),
+        calls: Effect.sync(() => state.calls),
+      })
+    }),
+  ),
+  deps: [stateNode],
+})
+const root = LayerNode.group([
+  SessionProcessor.node,
+  Session.node,
+  SessionProjector.node,
+  MessageV2.node,
+  Snapshot.node,
+  AgentSvc.node,
+  Permission.node,
+  Plugin.node,
+  Config.node,
+  SessionSummary.node,
+  Image.node,
+  SessionStatus.node,
+  EventV2Bridge.node,
+  Database.node,
+  CrossSpawnSpawner.node,
+  RuntimeFlags.node,
+  LLM.node,
+  testNode,
+])
+const env = LayerNode.compile(root, [
+  [LLM.node, llmNode],
+  [RuntimeFlags.node, RuntimeFlags.layer()],
+]).pipe(Layer.provideMerge(Layer.mergeAll(NodeFileSystem.layer, Bus.layer, SyncEvent.defaultLayer)))
 
 const it = testEffect(env)
 
@@ -128,7 +160,7 @@ describe("session processor retry limit", () => {
   it.live(
     "stops after two retries with the normalized retryable error",
     () =>
-      provideTmpdirInstance(
+      provideTmpdirProject(
         (dir) =>
           Effect.gen(function* () {
             process.env.KILO_SESSION_RETRY_LIMIT = "2"
@@ -186,7 +218,7 @@ describe("session processor retry limit", () => {
               tools: {},
             }
 
-            const expected = MessageV2.fromError(retryable429(), { providerID: ProviderID.make("test") })
+            const expected = MessageV2.fromError(retryable429(), { providerID: ProviderV2.ID.make("test") })
             try {
               const result = yield* handle.process(input)
               const calls = yield* test.calls

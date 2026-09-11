@@ -1,10 +1,16 @@
 import { AllowEverythingPermission } from "@/kilocode/permission/allow-everything" // kilocode_change
+import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { Permission } from "@/permission"
-import { PermissionID } from "@/permission/schema"
+// kilocode_change start
+import { SessionID } from "@/session/schema"
 import { Effect, Schema } from "effect"
-import { HttpApiBuilder, HttpApiError } from "effect/unstable/httpapi"
+// kilocode_change end
+import { HttpApiBuilder } from "effect/unstable/httpapi"
 import { InstanceHttpApi } from "../api"
-import { AllowEverythingBody, SaveAlwaysRulesBody } from "../groups/permission" // kilocode_change
+import { PermissionNotFoundError } from "../errors"
+// kilocode_change start
+import { AllowEverythingBody, SaveAlwaysRulesBody } from "../groups/permission"
+// kilocode_change end
 
 export const permissionHandlers = HttpApiBuilder.group(InstanceHttpApi, "permission", (handlers) =>
   Effect.gen(function* () {
@@ -15,45 +21,69 @@ export const permissionHandlers = HttpApiBuilder.group(InstanceHttpApi, "permiss
     })
 
     const reply = Effect.fn("PermissionHttpApi.reply")(function* (ctx: {
-      params: { requestID: PermissionID }
-      payload: Permission.ReplyBody
+      params: { requestID: PermissionV1.ID }
+      payload: PermissionV1.ReplyBody
     }) {
-      const ok = yield* svc.reply({
-        requestID: ctx.params.requestID,
-        reply: ctx.payload.reply,
-        message: ctx.payload.message,
-      })
-      if (!ok) return yield* new HttpApiError.NotFound({}) // kilocode_change
+      yield* svc
+        .reply({
+          // kilocode_change
+          requestID: ctx.params.requestID,
+          reply: ctx.payload.reply,
+          message: ctx.payload.message,
+          interactive: ctx.payload.interactive, // kilocode_change
+        })
+        .pipe(
+          Effect.catchTag("Permission.NotFoundError", (error) =>
+            Effect.fail(
+              new PermissionNotFoundError({
+                requestID: String(error.requestID),
+                message: `Permission request not found: ${error.requestID}`,
+              }),
+            ),
+          ),
+        )
       return true
     })
 
     // kilocode_change start
     const saveAlwaysRules = Effect.fn("PermissionHttpApi.saveAlwaysRules")(function* (ctx: {
-      params: { requestID: PermissionID }
+      params: { requestID: PermissionV1.ID }
       payload: Schema.Schema.Type<typeof SaveAlwaysRulesBody>
     }) {
-      const ok = yield* svc.saveAlwaysRules({
-        requestID: ctx.params.requestID,
-        approvedAlways: ctx.payload.approvedAlways ? [...ctx.payload.approvedAlways] : undefined,
-        deniedAlways: ctx.payload.deniedAlways ? [...ctx.payload.deniedAlways] : undefined,
-      })
-      if (!ok) return yield* new HttpApiError.NotFound({})
+      yield* svc
+        .saveAlwaysRules({
+          requestID: ctx.params.requestID,
+          approvedAlways: ctx.payload.approvedAlways ? [...ctx.payload.approvedAlways] : undefined,
+          deniedAlways: ctx.payload.deniedAlways ? [...ctx.payload.deniedAlways] : undefined,
+        })
+        .pipe(
+          Effect.catchTag("Permission.NotFoundError", (error) =>
+            Effect.fail(
+              new PermissionNotFoundError({
+                requestID: String(error.requestID),
+                message: `Permission request not found: ${error.requestID}`,
+              }),
+            ),
+          ),
+        )
       return true
     })
-    // kilocode_change end
 
-    // kilocode_change start
     const allowEverything = Effect.fn("PermissionHttpApi.allowEverything")(function* (ctx: {
       payload: Schema.Schema.Type<typeof AllowEverythingBody>
     }) {
-      return yield* AllowEverythingPermission.effect(ctx.payload)
+      return yield* AllowEverythingPermission.effect({
+        enable: ctx.payload.enable,
+        requestID: ctx.payload.requestID ? PermissionV1.ID.make(ctx.payload.requestID) : undefined,
+        sessionID: ctx.payload.sessionID ? SessionID.make(ctx.payload.sessionID) : undefined,
+      })
     })
-    // kilocode_change end
 
     return handlers
       .handle("list", list)
       .handle("reply", reply)
       .handle("saveAlwaysRules", saveAlwaysRules)
-      .handle("allowEverything", allowEverything) // kilocode_change
+      .handle("allowEverything", allowEverything)
+    // kilocode_change end
   }),
 )

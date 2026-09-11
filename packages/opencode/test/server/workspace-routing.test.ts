@@ -41,10 +41,22 @@ describe("getWorkspaceRouteSessionID", () => {
     expect(getWorkspaceRouteSessionID(url)).toBe(SessionID.make("ses_xyz"))
   })
 
+  test("extracts session ID from experimental background path", () => {
+    const url = new URL("http://localhost/experimental/session/ses_bg/background")
+    expect(getWorkspaceRouteSessionID(url)).toBe(SessionID.make("ses_bg"))
+  })
+
   test("returns null for /session/status", () => {
     const url = new URL("http://localhost/session/status")
     expect(getWorkspaceRouteSessionID(url)).toBeNull()
   })
+
+  // kilocode_change start
+  test("returns null for Kilo's /session/viewed route", () => {
+    const url = new URL("http://localhost/session/viewed")
+    expect(getWorkspaceRouteSessionID(url)).toBeNull()
+  })
+  // kilocode_change end
 
   test("returns null for non-session paths", () => {
     const url = new URL("http://localhost/config")

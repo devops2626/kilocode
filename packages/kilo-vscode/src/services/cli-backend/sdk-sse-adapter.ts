@@ -1,8 +1,33 @@
-import type { KiloClient, GlobalEvent, Event } from "@kilocode/sdk/v2/client"
+import type { KiloClient, GlobalEvent } from "@kilocode/sdk/v2/client"
 
-export type SSEEventHandler = (event: Event, directory?: string) => void
+export type WirePayload = GlobalEvent["payload"]
+type Flat<T> = T extends {
+  type: "sync"
+  syncEvent: infer E extends { type: string; id: string; seq: number; aggregateID: string; data: unknown }
+}
+  ? { type: "sync"; name: E["type"]; id: E["id"]; seq: E["seq"]; aggregateID: E["aggregateID"]; data: E["data"] }
+  : never
+export type WireSyncPayload = Extract<WirePayload, { type: "sync" }>
+export type SyncPayload = Flat<WireSyncPayload>
+export type SSEPayload = Exclude<WirePayload, { type: "sync" }> | SyncPayload
+export type SSEEventHandler = (event: SSEPayload, directory?: string) => void
 export type SSEErrorHandler = (error: Error) => void
 export type SSEStateHandler = (state: "connecting" | "connected" | "disconnected") => void
+
+export function normalize(payload: WireSyncPayload): SyncPayload
+export function normalize(payload: WirePayload): SSEPayload
+export function normalize(payload: WirePayload): SSEPayload {
+  if (payload.type !== "sync") return payload
+  const event = payload.syncEvent
+  return {
+    type: "sync",
+    name: event.type,
+    id: event.id,
+    seq: event.seq,
+    aggregateID: event.aggregateID,
+    data: event.data,
+  } as SyncPayload
+}
 
 /**
  * SSE adapter that consumes the SDK's `client.global.event()` AsyncGenerator
@@ -143,6 +168,7 @@ export class SdkSSEAdapter {
         console.log("[Kilo New] SSE: 🎬 Calling SDK global.event()...")
         const events = await this.client.global.event({
           signal: attempt.signal,
+          headers: { "x-kilo-sse-skip-fork-sync": "1" },
           // Disable SDK-internal retries — consumeLoop handles reconnection
           // with its own outer while-loop. Without this the SDK's infinite
           // retry loop with exponential backoff runs in parallel, causing
@@ -179,13 +205,7 @@ export class SdkSSEAdapter {
             this.notifyState("connected")
           }
 
-          // The SDK yields GlobalEvent = { directory, payload: Event }.
-          const globalEvent = event as GlobalEvent
-          const type = (globalEvent.payload as { type: string }).type
-          if (type !== "server.heartbeat") {
-            console.log("[Kilo New] SSE: 📨 Event:", type)
-          }
-          this.notifyEvent(globalEvent.payload as Event, globalEvent.directory)
+          this.notifyEvent(normalize(event.payload), event.directory)
         }
 
         console.log(
@@ -241,7 +261,7 @@ export class SdkSSEAdapter {
 
   // ── Notify helpers ─────────────────────────────────────────────────
 
-  private notifyEvent(event: Event, directory?: string): void {
+  private notifyEvent(event: SSEPayload, directory?: string): void {
     for (const handler of this.handlers) {
       try {
         handler(event, directory)

@@ -1,7 +1,12 @@
 import { Schema } from "effect"
 import z from "zod"
 import type { IndexingConfigInput } from "./indexing/config-manager"
+import { DEFAULT_VECTOR_STORE } from "./indexing/constants"
 import type { EmbedderProvider } from "./indexing/interfaces/manager"
+import { FILE_EXTENSION_PATTERN, normalizeFileExtensions } from "./file-extensions"
+
+export { DEFAULT_VECTOR_STORE } from "./indexing/constants"
+export { isFileExtension, normalizeFileExtensions, parseFileExtensions } from "./file-extensions"
 
 const providers = [
   "kilo",
@@ -29,7 +34,7 @@ export const IndexingConfig = z
       .nullable()
       .optional()
       .describe("Override embedding vector dimension (auto-detected from model if omitted)"),
-    vectorStore: z.enum(stores).optional().describe("Vector store backend (default: qdrant)"),
+    vectorStore: z.enum(stores).optional().describe("Vector store backend (default: lancedb)"),
     kilo: z
       .object({
         apiKey: z.string().optional(),
@@ -125,6 +130,11 @@ export const IndexingConfig = z
       .positive()
       .optional()
       .describe("Maximum retry attempts for failed embedding batches (default: 3)"),
+    fileExtensions: z
+      .array(z.string().trim().regex(FILE_EXTENSION_PATTERN))
+      .min(1)
+      .optional()
+      .describe("File extension allowlist for codebase indexing (uses built-in defaults if omitted)"),
   })
   .strict()
   .meta({ ref: "IndexingConfig" })
@@ -147,7 +157,7 @@ export const IndexingSchema = Schema.Struct({
   dimension: Schema.optional(Schema.NullOr(PositiveInt)).annotate({
     description: "Override embedding vector dimension (auto-detected from model if omitted)",
   }),
-  vectorStore: Schema.optional(Store).annotate({ description: "Vector store backend (default: qdrant)" }),
+  vectorStore: Schema.optional(Store).annotate({ description: "Vector store backend (default: lancedb)" }),
   kilo: Schema.optional(
     Schema.Struct({
       apiKey: Schema.optional(Schema.String),
@@ -226,6 +236,13 @@ export const IndexingSchema = Schema.Struct({
   scannerMaxBatchRetries: Schema.optional(PositiveInt).annotate({
     description: "Maximum retry attempts for failed embedding batches (default: 3)",
   }),
+  fileExtensions: Schema.optional(
+    Schema.mutable(
+      Schema.Array(Schema.String.check(Schema.isPattern(/^\s*\.?[A-Za-z0-9][A-Za-z0-9_+-]*\s*$/))),
+    ).check(Schema.isMinLength(1)),
+  ).annotate({
+    description: "File extension allowlist for codebase indexing (uses built-in defaults if omitted)",
+  }),
 }).annotate({
   identifier: "IndexingConfig",
   description: "Codebase indexing configuration",
@@ -237,7 +254,7 @@ export function toIndexingConfigInput(cfg: IndexingConfig | undefined): Indexing
   return {
     enabled: cfg?.enabled ?? false,
     embedderProvider: provider,
-    vectorStoreProvider: cfg?.vectorStore,
+    vectorStoreProvider: cfg?.vectorStore ?? DEFAULT_VECTOR_STORE,
     modelId: cfg?.model ?? undefined,
     modelDimension: cfg?.dimension ?? undefined,
     lancedbVectorStoreDirectory: cfg?.lancedb?.directory,
@@ -247,6 +264,7 @@ export function toIndexingConfigInput(cfg: IndexingConfig | undefined): Indexing
     searchMaxResults: cfg?.searchMaxResults,
     embeddingBatchSize: cfg?.embeddingBatchSize,
     scannerMaxBatchRetries: cfg?.scannerMaxBatchRetries,
+    fileExtensions: normalizeFileExtensions(cfg?.fileExtensions),
     kiloApiKey: cfg?.kilo?.apiKey,
     kiloBaseUrl: cfg?.kilo?.baseUrl,
     kiloOrganizationId: cfg?.kilo?.organizationId,

@@ -28,7 +28,7 @@ class ModePicker : PickerButton() {
     init {
         isEnabled = false
         text = " "
-        toolTipText = KiloBundle.message("mode.picker.tooltip")
+        syncTooltip()
 
         addMouseListener(object : MouseAdapter() {
             override fun mouseClicked(e: MouseEvent) {
@@ -49,6 +49,29 @@ class ModePicker : PickerButton() {
         refresh()
     }
 
+    /** Whether [cycle] would move to a different mode than the one selected now. */
+    fun canCycle(): Boolean = nextCycleItem() != null
+
+    /** Selects the next non-deprecated mode after the current one, wrapping at the end. */
+    fun cycle() {
+        val next = nextCycleItem() ?: return
+        selected = next
+        refresh()
+        onSelect(next)
+    }
+
+    private fun nextCycleItem(): Item? {
+        val pool = items.filterNot { it.deprecated }
+        if (pool.isEmpty()) return null
+        val index = pool.indexOfFirst { it.id == selected?.id }
+        val next = pool[(index + 1).mod(pool.size)]
+        return next.takeIf { it.id != selected?.id }
+    }
+
+    override fun syncTooltip() {
+        toolTipText = tip(KiloBundle.message("mode.picker.tooltip"))
+    }
+
     internal fun itemsForTest(): List<Item> = items
 
     internal fun selectedForTest(): Item? = selected
@@ -64,6 +87,11 @@ class ModePicker : PickerButton() {
         text = "$display ▴"
         isEnabled = true
         cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
+    }
+
+    fun open() {
+        if (!isEnabled || items.isEmpty()) return
+        showPopup()
     }
 
     private fun showPopup() {
@@ -87,6 +115,7 @@ class ModePicker : PickerButton() {
             }
             .createPopup()
 
+        restoreFocusOnPick(popup)
         popup.show(PopupShowOptions.aboveComponent(this))
     }
 }

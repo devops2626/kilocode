@@ -1,15 +1,27 @@
 package ai.kilocode.client.session.views
 
 import ai.kilocode.client.plugin.KiloBundle
+import ai.kilocode.client.session.SessionFileOpener
 import ai.kilocode.client.session.model.Content
 import ai.kilocode.client.session.model.Tool
 import ai.kilocode.client.session.model.ToolExecState
 import ai.kilocode.client.session.ui.style.SessionEditorStyle
+import ai.kilocode.client.session.ui.style.SessionUiStyle
+import ai.kilocode.client.session.ui.selection.SessionSelection
 import ai.kilocode.client.session.views.base.PartView
-import ai.kilocode.client.ui.md.MdView
+import ai.kilocode.client.ui.md.MdViewFactory
+import ai.kilocode.client.session.openSessionLink
+import com.intellij.openapi.util.Disposer
+import com.intellij.util.ui.JBUI
 import java.awt.BorderLayout
 
-class PlanExitView(tool: Tool, openFile: (String) -> Unit) : PartView() {
+class PlanExitView(
+    tool: Tool,
+    private val openFile: SessionFileOpener,
+    private val openUrl: (String) -> Unit = {},
+    selection: SessionSelection? = null,
+) : PartView() {
+
     companion object {
         fun canRender(tool: Tool): Boolean = tool.name == "plan_exit" && tool.state == ToolExecState.COMPLETED
     }
@@ -17,12 +29,16 @@ class PlanExitView(tool: Tool, openFile: (String) -> Unit) : PartView() {
     override val contentId: String = tool.id
 
     private var item = tool
-    private val md = MdView.html()
+    private val md = MdViewFactory.create(SessionEditorStyle.current(), selection)
 
     init {
         layout = BorderLayout()
         isOpaque = false
-        md.addLinkListener { openFile(it.href) }
+        // Prose, not a raised block, but still indented to the regular card header's leading edge so
+        // the plan-ready line aligns left with the tool/message views above and below it.
+        border = JBUI.Borders.empty(0, SessionUiStyle.View.Header.left(), 0, 0)
+        Disposer.register(this, md)
+        md.addLinkListener { openSessionLink(it, openFile, openUrl) }
         add(md.component, BorderLayout.CENTER)
         applyStyle(SessionEditorStyle.current())
         sync()
@@ -35,6 +51,10 @@ class PlanExitView(tool: Tool, openFile: (String) -> Unit) : PartView() {
     }
 
     override fun applyStyle(style: SessionEditorStyle) {
+        md.applyStyle(style)
+        // Plan-ready is transcript prose, not a raised block: stay transparent so it reads on the
+        // session backdrop like the assistant's other text.
+        md.opaque = false
         md.font = style.transcriptFont
         md.codeFont = style.editorFamily
         md.foreground = style.editorForeground

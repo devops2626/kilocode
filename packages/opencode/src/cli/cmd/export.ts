@@ -1,4 +1,5 @@
 import { Session } from "@/session/session"
+import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { MessageV2 } from "../../session/message-v2"
 import { SessionID } from "../../session/schema"
 import { effectCmd, fail } from "../effect-cmd"
@@ -23,14 +24,20 @@ function span(id: string, value: { value: string; start: number; end: number }) 
   }
 }
 
-function diff(kind: string, diffs: { file: string; additions: number; deletions: number }[] | undefined) {
+function diff(
+  kind: string,
+  // kilocode_change start - retain Kilo summary counts while accepting upstream's optional file and patch values
+  diffs: { file?: string; patch?: string; additions: number; deletions: number }[] | undefined,
+  // kilocode_change end
+) {
   return diffs?.map((item, i) => ({
     ...item,
-    file: redact(`${kind}-file`, String(i), item.file),
+    file: item.file === undefined ? undefined : redact(`${kind}-file`, String(i), item.file),
+    patch: item.patch === undefined ? undefined : redact(`${kind}-patch`, String(i), item.patch),
   }))
 }
 
-function source(part: MessageV2.FilePart) {
+function source(part: SessionV1.FilePart) {
   if (!part.source) return part.source
   if (part.source.type === "symbol") {
     return {
@@ -55,7 +62,7 @@ function source(part: MessageV2.FilePart) {
   }
 }
 
-function filepart(part: MessageV2.FilePart): MessageV2.FilePart {
+function filepart(part: SessionV1.FilePart): SessionV1.FilePart {
   return {
     ...part,
     url: redact("file-url", part.id, part.url),
@@ -64,7 +71,7 @@ function filepart(part: MessageV2.FilePart): MessageV2.FilePart {
   }
 }
 
-function part(part: MessageV2.Part): MessageV2.Part {
+function part(part: SessionV1.Part): SessionV1.Part {
   switch (part.type) {
     case "text":
       return {
@@ -158,7 +165,7 @@ function part(part: MessageV2.Part): MessageV2.Part {
 
 const partFn = part
 
-function sanitize(data: { info: Session.Info; messages: MessageV2.WithParts[] }) {
+function sanitize(data: { info: Session.Info; messages: SessionV1.WithParts[] }) {
   return {
     info: {
       ...data.info,

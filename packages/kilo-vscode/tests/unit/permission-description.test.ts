@@ -1,9 +1,11 @@
 import { describe, test, expect } from "bun:test"
 import {
   describePatterns,
+  describeRule,
   resolveLabel,
   TOOL_LABEL_KEYS,
 } from "../../webview-ui/src/components/chat/permission-dock-utils"
+import { resolveTemplate } from "../../webview-ui/src/context/language-utils"
 
 // Mock t() that returns the English label for known keys, or the key itself
 const labels: Record<string, string> = {
@@ -16,7 +18,7 @@ const labels: Record<string, string> = {
   "ui.permission.toolLabel.webSearch": "Web Search",
   "ui.permission.toolLabel.list": "List",
   "ui.permission.toolLabel.bash": "Bash",
-  "ui.permission.toolLabel.externalDirectory": "Read External Directory",
+  "ui.permission.toolLabel.externalDirectory": "Access External Directory",
   "ui.permission.toolLabel.webFetch": "Web Fetch",
   "ui.permission.toolLabel.codeSearch": "Code Search",
   "ui.permission.toolLabel.todoRead": "Todo Read",
@@ -24,8 +26,10 @@ const labels: Record<string, string> = {
   "ui.permission.toolLabel.task": "Task",
   "ui.permission.toolLabel.skill": "Skill",
   "ui.permission.toolLabel.lsp": "LSP",
+  "ui.permission.doomLoop.prompt": "Potential loop detected for the {{tool}} tool. Continue running?",
+  "ui.permission.doomLoop.rule": "Continue {{tool}} calls",
 }
-const t = (key: string) => labels[key] ?? key
+const t = (key: string, params?: Record<string, string>) => resolveTemplate(labels[key] ?? key, params)
 
 describe("describePatterns", () => {
   test("returns null when patterns is empty", () => {
@@ -75,9 +79,9 @@ describe("describePatterns", () => {
     expect(result).toEqual({ kind: "single", text: "Edit file.ts" })
   })
 
-  test("external_directory uses Read External Directory label", () => {
+  test("external_directory uses Access External Directory label", () => {
     const result = describePatterns("external_directory", ["/home/user/project/*"], t)
-    expect(result).toEqual({ kind: "single", text: "Read External Directory /home/user/project/*" })
+    expect(result).toEqual({ kind: "single", text: "Access External Directory /home/user/project/*" })
   })
 
   test("glob tool uses Glob Search label", () => {
@@ -93,6 +97,14 @@ describe("describePatterns", () => {
   test("websearch uses Web Search label", () => {
     const result = describePatterns("websearch", ["query"], t)
     expect(result).toEqual({ kind: "single", text: "Web Search query" })
+  })
+
+  test("doom loop describes the repeated tool with its human-readable label", () => {
+    const result = describePatterns("doom_loop", ["read"], t)
+    expect(result).toEqual({
+      kind: "single",
+      text: "Potential loop detected for the Read tool. Continue running?",
+    })
   })
 
   test("TOOL_LABEL_KEYS maps all expected tools", () => {
@@ -162,6 +174,18 @@ describe("describePatterns", () => {
   })
 })
 
+describe("describeRule", () => {
+  test("describes doom loop rules as the action being allowed or denied", () => {
+    expect(describeRule("doom_loop", "read", t)).toBe("Continue Read calls")
+  })
+
+  test("preserves existing permission rule labels", () => {
+    expect(describeRule("read", "*", t)).toBe("Read")
+    expect(describeRule("external_directory", "*", t)).toBe("Access External Directory")
+    expect(describeRule("read", "src/app.ts", t)).toBe("Read src/app.ts")
+  })
+})
+
 describe("resolveLabel", () => {
   test("returns translated label for known tool", () => {
     expect(resolveLabel("read", t)).toBe("Read")
@@ -190,7 +214,7 @@ describe("resolveLabel", () => {
       grep: "Grep Search",
       list: "List",
       bash: "Bash",
-      external_directory: "Read External Directory",
+      external_directory: "Access External Directory",
       webfetch: "Web Fetch",
       websearch: "Web Search",
       codesearch: "Code Search",

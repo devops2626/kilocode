@@ -1,14 +1,19 @@
 package ai.kilocode.client.session.controller
 
+import ai.kilocode.client.util.edtWait
+import ai.kilocode.client.testing.TestUiTimers
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.util.Disposer
 import com.intellij.testFramework.fixtures.BasePlatformTestCase
-import com.intellij.util.ui.UIUtil
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.runBlocking
 
 class DelayedStateTest : BasePlatformTestCase() {
     private val states = mutableListOf<DelayedState>()
+    private lateinit var timers: TestUiTimers
+
+    override fun setUp() {
+        super.setUp()
+        timers = TestUiTimers()
+    }
 
     override fun tearDown() {
         try {
@@ -25,7 +30,7 @@ class DelayedStateTest : BasePlatformTestCase() {
         val delay = delayed(30)
 
         delay.run("loading", { state }) { out.add(it) }
-        pause(120)
+        timers.advanceBy(30)
 
         assertEquals(listOf("loading"), out)
     }
@@ -37,7 +42,7 @@ class DelayedStateTest : BasePlatformTestCase() {
 
         delay.run("loading", { state }) { out.add(it) }
         edt { state = "loaded" }
-        pause(120)
+        timers.advanceBy(30)
 
         assertTrue(out.isEmpty())
     }
@@ -50,7 +55,7 @@ class DelayedStateTest : BasePlatformTestCase() {
 
         delay.run("loading", { first }) { out.add("first:$it") }
         delay.run("connecting", { second }) { out.add("second:$it") }
-        pause(120)
+        timers.advanceBy(30)
 
         assertEquals(listOf("first:loading", "second:connecting"), out)
     }
@@ -63,7 +68,7 @@ class DelayedStateTest : BasePlatformTestCase() {
         delay.run("first", { state }) { out.add(it) }
         edt { state = "second" }
         delay.run("second", { state }) { out.add(it) }
-        pause(120)
+        timers.advanceBy(30)
 
         assertEquals(listOf("second"), out)
     }
@@ -75,7 +80,7 @@ class DelayedStateTest : BasePlatformTestCase() {
 
         delay.run("loading", { state }) { out.add(it) }
         delay.cancel()
-        pause(120)
+        timers.advanceBy(30)
 
         assertTrue(out.isEmpty())
     }
@@ -85,9 +90,9 @@ class DelayedStateTest : BasePlatformTestCase() {
         val delay = delayed(30)
 
         delay.run("loading", { state }) {}
-        pause(10)
+        timers.advanceBy(10)
         delay.cancel()
-        pause(10)
+        timers.advanceBy(10)
 
         assertFalse(delay.active())
     }
@@ -97,7 +102,7 @@ class DelayedStateTest : BasePlatformTestCase() {
         val delay = delayed(30)
 
         delay.run("loading", { state }) {}
-        pause(120)
+        timers.advanceBy(30)
 
         assertFalse(delay.active())
     }
@@ -110,7 +115,7 @@ class DelayedStateTest : BasePlatformTestCase() {
         delay.run("loading", { state }) { out.add(it) }
         Disposer.dispose(delay)
         states.remove(delay)
-        pause(120)
+        timers.advanceBy(30)
 
         assertTrue(out.isEmpty())
     }
@@ -123,26 +128,16 @@ class DelayedStateTest : BasePlatformTestCase() {
         delay.run("loading", { state }) {
             out.add(ApplicationManager.getApplication().isDispatchThread)
         }
-        pause(30)
+        timers.advanceBy(0)
 
         assertEquals(listOf(true), out)
     }
 
     private fun delayed(ms: Long): DelayedState {
-        val state = DelayedState(ms)
+        val state = DelayedState(ms, timers)
         states.add(state)
         return state
     }
 
-    private fun pause(ms: Long) = runBlocking {
-        val tick = 10L
-        repeat((ms / tick).coerceAtLeast(1).toInt()) {
-            delay(tick)
-            edt { UIUtil.dispatchAllInvocationEvents() }
-        }
-    }
-
-    private fun edt(block: () -> Unit) {
-        ApplicationManager.getApplication().invokeAndWait(block)
-    }
+    private fun edt(block: () -> Unit) = edtWait(block)
 }

@@ -9,6 +9,11 @@ import type { KiloClient, Session, TextPartInput, FilePartInput } from "@kilocod
 import type { CloudSessionData, EditorContext } from "../../services/cli-backend/types"
 import { getErrorMessage, sessionToWebview, mapCloudSessionMessageToWebviewMessage } from "../../kilo-provider-utils"
 import type { MessageFile } from "../message-files"
+import { type ReviewMessageData } from "../../shared/review-comments"
+import { feedbackMetadata, type BrowserFeedbackData } from "../../shared/browser-feedback"
+import { completesWithoutStatus } from "../command-completion"
+
+const TIMEOUT = 30_000
 
 export interface CloudSessionContext {
   readonly client: KiloClient | null
@@ -18,6 +23,7 @@ export interface CloudSessionContext {
     recordMessageSessionId(messageId: string, sessionId: string): void
   }
   postMessage(msg: unknown): void
+  notify?(message: string): void
   getWorkspaceDirectory(sessionId?: string): string
   gatherEditorContext(): Promise<EditorContext>
   runWithMessageConfirmation?<T>(
@@ -73,7 +79,7 @@ export async function handleRequestCloudSessionData(ctx: CloudSessionContext, se
   }
 
   try {
-    const result = await ctx.client.kilo.cloud.session.get({ id: sessionId })
+    const result = await ctx.client.kilo.cloud.session.get({ id: sessionId }, { signal: AbortSignal.timeout(TIMEOUT) })
     const data = result.data as CloudSessionData | undefined
     if (!data) {
       ctx.postMessage({
@@ -117,8 +123,10 @@ export async function handleImportAndSend(
   agent?: string,
   variant?: string,
   files?: MessageFile[],
+  review?: ReviewMessageData,
   command?: string,
   commandArgs?: string,
+  browserFeedback?: BrowserFeedbackData,
 ): Promise<void> {
   if (!ctx.client) {
     ctx.postMessage({
@@ -135,10 +143,13 @@ export async function handleImportAndSend(
   // Step 1: Import the cloud session with fresh IDs
   let session: Session | undefined
   try {
-    const result = await ctx.client.kilo.cloud.session.import({
-      sessionId: cloudSessionId,
-      directory: dir,
-    })
+    const result = await ctx.client.kilo.cloud.session.import(
+      {
+        sessionId: cloudSessionId,
+        directory: dir,
+      },
+      { signal: AbortSignal.timeout(TIMEOUT) },
+    )
     session = result.data as Session | undefined
   } catch (error) {
     console.error("[Kilo New] KiloProvider: ❌ Cloud session import failed:", error)
@@ -185,7 +196,7 @@ export async function handleImportAndSend(
           filename: f.filename,
           source: f.source,
         }))
-        await client.session.command(
+        const result = await client.session.command(
           {
             sessionID: session.id,
             directory: dir,
@@ -199,6 +210,13 @@ export async function handleImportAndSend(
           },
           { throwOnError: true },
         )
+        if (command === "goal" && !commandArgs?.trim()) {
+          const message = result.data.parts
+            .filter((part) => part.type === "text")
+            .map((part) => part.text)
+            .join("\n")
+          if (message) ctx.notify?.(message)
+        }
         return
       }
 
@@ -208,7 +226,7 @@ export async function handleImportAndSend(
           parts.push({ type: "file", mime: f.mime, url: f.url, filename: f.filename, source: f.source })
         }
       }
-      parts.push({ type: "text", text })
+      parts.push({ type: "text", text, metadata: feedbackMetadata(review, browserFeedback) })
 
       const editorContext = await ctx.gatherEditorContext()
       await client.session.promptAsync(
@@ -225,6 +243,9 @@ export async function handleImportAndSend(
         { throwOnError: true },
       )
     })
+    if (messageID && command && completesWithoutStatus(command)) {
+      ctx.postMessage({ type: "sessionCommandCompleted", messageID })
+    }
   } catch (err) {
     console.error("[Kilo New] Failed to send message after cloud import:", err)
     ctx.postMessage({
@@ -235,6 +256,8 @@ export async function handleImportAndSend(
       draftID: session.id,
       messageID,
       files,
+      review: command ? undefined : review,
+      browserFeedback: command ? undefined : browserFeedback,
     })
   }
 }
